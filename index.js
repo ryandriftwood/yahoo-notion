@@ -38,30 +38,27 @@ const YAHOO_AUTHORIZE_URL = "https://api.login.yahoo.com/oauth/v2/request_auth";
 
 /**
  * Base URL + callback
- * - Set BASE_URL in Render to: https://ys.driftwoodclimate.com
- * - Set Yahoo Redirect/Callback URL to: https://ys.driftwoodclimate.com/callback/yahoo
  */
 const BASE_URL = process.env.BASE_URL || "https://ys.driftwoodclimate.com";
 const CALLBACK_URL = `${BASE_URL}/callback/yahoo`;
 
 /**
- * Yahoo OAuth signer
- * NOTE: Yahoo may label these as "Client ID/Secret" in the UI.
- * For Fantasy Sports OAuth1, treat them as consumer key/secret.
+ * Yahoo OAuth signer (PLAINTEXT)
+ * This matches Yahoo’s “from scratch” docs approach for token endpoints.
  */
 const yahooOAuth = new OAuth({
 	consumer: {
-		key: process.env.YAHOO_CLIENT_ID,
+		key: process.env.YAHOO_CLIENT_ID, // long dj0y... value
 		secret: process.env.YAHOO_CLIENT_SECRET,
 	},
-	signature_method: "HMAC-SHA1",
-	hash_function(base_string, key) {
-		return crypto.createHmac("sha1", key).update(base_string).digest("base64");
+	signature_method: "PLAINTEXT",
+	hash_function() {
+		// Not used for PLAINTEXT
+		return "";
 	},
-	nonce_length: 32,
 });
 
-// Force correct nonce + timestamp generation (fixes bad oauth_timestamp)
+// Nonce + timestamp are still required OAuth params
 yahooOAuth.getNonce = () => crypto.randomBytes(16).toString("hex");
 yahooOAuth.getTimeStamp = () => Math.floor(Date.now() / 1000).toString();
 
@@ -114,13 +111,7 @@ app.get("/", (req, res) => {
 });
 
 /**
- * ------------------------
- * Notion test endpoint
- * ------------------------
- * Env vars required:
- * - NOTION_TOKEN
- * - NOTION_LEAGUE_STATE_PAGE_ID
- * - NOTION_API_UPDATES_LOG_DATABASE_ID
+ * Notion write test
  */
 app.get("/notion/test", async (req, res) => {
 	try {
@@ -139,12 +130,7 @@ app.get("/notion/test", async (req, res) => {
 					object: "block",
 					type: "paragraph",
 					paragraph: {
-						rich_text: [
-							{
-								type: "text",
-								text: { content: `✅ Notion write test from Render at ${now}` },
-							},
-						],
+						rich_text: [{ type: "text", text: { content: `✅ Notion write test from Render at ${now}` } }],
 					},
 				},
 			],
@@ -153,14 +139,7 @@ app.get("/notion/test", async (req, res) => {
 		await notion.pages.create({
 			parent: { database_id: updatesLogDatabaseId },
 			properties: {
-				Name: {
-					title: [
-						{
-							type: "text",
-							text: { content: `Sync test ${now}` },
-						},
-					],
-				},
+				Name: { title: [{ type: "text", text: { content: `Sync test ${now}` } }] },
 			},
 		});
 
@@ -172,9 +151,7 @@ app.get("/notion/test", async (req, res) => {
 });
 
 /**
- * ------------------------
- * Yahoo debug endpoint: prints the exact signed URL (no Yahoo call)
- * ------------------------
+ * Debug: show the signed request-token URL (does not call Yahoo)
  */
 app.get("/yahoo/debug-request-token-url", async (req, res) => {
 	try {
@@ -194,13 +171,7 @@ app.get("/yahoo/debug-request-token-url", async (req, res) => {
 		url.searchParams.set("xoauth_lang_pref", "en-us");
 		for (const [k, v] of Object.entries(oauthParams)) url.searchParams.set(k, v);
 
-		return res.type("text/plain").send(
-			[
-				`CALLBACK_URL=${CALLBACK_URL}`,
-				`YAHOO_CLIENT_ID_START=${(process.env.YAHOO_CLIENT_ID || "").slice(0, 12)}`,
-				`REQUEST_URL=${url.toString()}`,
-			].join("\n\n")
-		);
+		return res.type("text/plain").send(url.toString());
 	} catch (err) {
 		console.error(err);
 		return res.status(500).send(`Error: ${err.message || String(err)}`);
@@ -208,10 +179,7 @@ app.get("/yahoo/debug-request-token-url", async (req, res) => {
 });
 
 /**
- * ------------------------
- * Yahoo OAuth step 1: connect
- * ------------------------
- * Requests a request token, stores it, redirects you to Yahoo approval page.
+ * Yahoo OAuth step 1: request token
  */
 app.get("/connect/yahoo", async (req, res) => {
 	try {
@@ -232,13 +200,10 @@ app.get("/connect/yahoo", async (req, res) => {
 
 		const oauthParams = yahooOAuth.authorize(requestData);
 
-		// Put ALL oauth params in query string (more reliable with Yahoo)
 		const url = new URL(YAHOO_REQUEST_TOKEN_URL);
 		url.searchParams.set("oauth_callback", CALLBACK_URL);
 		url.searchParams.set("xoauth_lang_pref", "en-us");
-		for (const [k, v] of Object.entries(oauthParams)) {
-			url.searchParams.set(k, v);
-		}
+		for (const [k, v] of Object.entries(oauthParams)) url.searchParams.set(k, v);
 
 		const r = await fetch(url.toString(), { method: "GET" });
 		const text = await r.text();
@@ -247,7 +212,6 @@ app.get("/connect/yahoo", async (req, res) => {
 			return res.status(500).send(`Request token failed: HTTP ${r.status}\n\n${text}`);
 		}
 
-		// Response is querystring
 		const params = new URLSearchParams(text);
 		const token = params.get("oauth_token");
 		const tokenSecret = params.get("oauth_token_secret");
@@ -273,10 +237,7 @@ app.get("/connect/yahoo", async (req, res) => {
 });
 
 /**
- * ------------------------
- * Yahoo OAuth step 2: callback
- * ------------------------
- * Exchanges request token + verifier for access token, stores it.
+ * Yahoo OAuth step 2: callback → access token
  */
 app.get("/callback/yahoo", async (req, res) => {
 	try {
@@ -310,9 +271,7 @@ app.get("/callback/yahoo", async (req, res) => {
 
 		const url = new URL(YAHOO_ACCESS_TOKEN_URL);
 		url.searchParams.set("oauth_verifier", String(oauth_verifier));
-		for (const [k, v] of Object.entries(oauthParams)) {
-			url.searchParams.set(k, v);
-		}
+		for (const [k, v] of Object.entries(oauthParams)) url.searchParams.set(k, v);
 
 		const r = await fetch(url.toString(), { method: "GET" });
 		const text = await r.text();
