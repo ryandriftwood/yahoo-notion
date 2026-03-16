@@ -1,48 +1,64 @@
 import express from "express";
 import { Client as NotionClient } from "@notionhq/client";
-import pkg from "oauth";
 import pg from "pg";
+import fetch from "node-fetch";
+import OAuth from "oauth-1.0a";
+import crypto from "crypto";
 
-const { OAuth } = pkg;
 const { Pool } = pg;
 
 const app = express();
 
+/**
+ * ------------------------
+ * Notion client
+ * ------------------------
+ */
 const notion = new NotionClient({
 	auth: process.env.NOTION_TOKEN,
 });
 
+/**
+ * ------------------------
+ * Postgres
+ * ------------------------
+ */
 const pool = new Pool({
 	connectionString: process.env.DATABASE_URL,
 });
 
 /**
- * Yahoo OAuth 1.0a endpoints (these must be exact)
+ * ------------------------
+ * Yahoo OAuth 1.0a endpoints
+ * ------------------------
  */
 const YAHOO_REQUEST_TOKEN_URL = "https://api.login.yahoo.com/oauth/v2/get_request_token";
 const YAHOO_ACCESS_TOKEN_URL = "https://api.login.yahoo.com/oauth/v2/get_token";
+const YAHOO_AUTHORIZE_URL = "https://api.login.yahoo.com/oauth/v2/request_auth";
 
 /**
- * IMPORTANT:
- * - BASE_URL should be set in Render env vars as: https://ys.driftwoodclimate.com
- * - Yahoo redirect/callback URL should be: https://ys.driftwoodclimate.com/callback/yahoo
+ * Base URL + callback
+ * - Set BASE_URL in Render to: https://ys.driftwoodclimate.com
+ * - Set Yahoo Redirect/Callback URL to: https://ys.driftwoodclimate.com/callback/yahoo
  */
 const BASE_URL = process.env.BASE_URL || "https://ys.driftwoodclimate.com";
 const CALLBACK_URL = `${BASE_URL}/callback/yahoo`;
 
-// Create OAuth client
-const oauth = new OAuth(
-	YAHOO_REQUEST_TOKEN_URL,
-	YAHOO_ACCESS_TOKEN_URL,
-	process.env.YAHOO_CLIENT_ID,
-	process.env.YAHOO_CLIENT_SECRET,
-	"1.0",
-	CALLBACK_URL,
-	"HMAC-SHA1"
-);
-
-oauth._requestTokenHttpMethod = "GET";
-oauth._accessTokenHttpMethod = "GET";
+/**
+ * Yahoo OAuth signer
+ * NOTE: Yahoo may label these as "Client ID/Secret" in the UI.
+ * For Fantasy Sports OAuth1, treat them as consumer key/secret.
+ */
+const yahooOAuth = new OAuth({
+	consumer: {
+		key: process.env.YAHOO_CLIENT_ID,
+		secret: process.env.YAHOO_CLIENT_SECRET,
+	},
+	signature_method: "HMAC-SHA1",
+	hash_function(base_string, key) {
+		return crypto.createHmac("sha1", key).update(base_string).digest("base64");
+	},
+});
 
 async function ensureTables() {
 	await pool.query(`
@@ -93,9 +109,13 @@ app.get("/", (req, res) => {
 });
 
 /**
- * Notion write test
- * - Appends a paragraph to League State page
- * - Creates a row in API Updates Log database
+ * ------------------------
+ * Notion test endpoint
+ * ------------------------
+ * Env vars required:
+ * - NOTION_TOKEN
+ * - NOTION_LEAGUE_STATE_PAGE_ID
+ * - NOTION_API_UPDATES_LOG_DATABASE_ID
  */
 app.get("/notion/test", async (req, res) => {
 	try {
@@ -147,10 +167,16 @@ app.get("/notion/test", async (req, res) => {
 });
 
 /**
- * Yahoo OAuth: step 1
- * - gets request token
- * - stores request token secret in Postgres
- * - redirects user to Yahoo approval page
+ * ------------------------
+ * Yahoo OAuth step 1: connect
+ * ------------------------
+ * This requests a request token, stores it, then redirects you to Yahoo to approve.
+ *
+ * Required env vars:
+ * - YAHOO_CLIENT_ID
+ * - YAHOO_CLIENT_SECRET
+ * - DATABASE_URL
+ * - BASE_URL (recommended)
  */
 app.get("/connect/yahoo", async (req, res) => {
 	try {
@@ -160,59 +186,65 @@ app.get("/connect/yahoo", async (req, res) => {
 
 		await ensureTables();
 
-return res.send(
-  JSON.stringify(
-    {
-      requestTokenUrl: YAHOO_REQUEST_TOKEN_URL,
-      accessTokenUrl: YAHOO_ACCESS_TOKEN_URL,
-      callbackUrl: CALLBACK_URL,
-      hasClientId: Boolean(process.env.YAHOO_CLIENT_ID),
-      hasClientSecret: Boolean(process.env.YAHOO_CLIENT_SECRET),
-      clientIdStartsWith: process.env.YAHOO_CLIENT_ID?.slice(0, 10) || null
-    },
-    null,
-    2
-  )
-);
-		
-		// Force callback param explicitly
-		oauth.getOAuthRequestToken({ oauth_callback: CALLBACK_URL }, async (err, token, tokenSecret, results) => {
-			if (err) {
-				console.error("Yahoo request token error:", err);
-				const statusCode = err.statusCode || err.status_code || err.code;
-				const data = err.data || err.body || err.response || err;
-				return res
-					.status(500)
-					.send(
-						`Failed to get request token.\n\nstatusCode=${statusCode}\n\n` +
-							`details=${typeof data === "string" ? data : JSON.stringify(data, null, 2)}`
-					);
-			}
+		// We sign a GET request that includes oauth_callback
+		const requestData = {
+			url: YAHOO_REQUEST_TOKEN_URL,
+			method: "GET",
+			data: { oauth_callback: CALLBACK_URL },
+		};
 
-			const authUrl = results?.xoauth_request_auth_url;
-			if (!authUrl) return res.status(500).send("Yahoo did not return xoauth_request_auth_url");
+		const authHeader = yahooOAuth.toHeader(yahooOAuth.authorize(requestData));
 
-			// store request token + secret so callback can exchange it
-			await pool.query(
-				`INSERT INTO yahoo_request_tokens (oauth_token, oauth_token_secret)
-				 VALUES ($1, $2)
-				 ON CONFLICT (oauth_token) DO UPDATE SET oauth_token_secret = EXCLUDED.oauth_token_secret`,
-				[token, tokenSecret]
-			);
+		// Build URL with query param
+		const url = new URL(YAHOO_REQUEST_TOKEN_URL);
+		url.searchParams.set("oauth_callback", CALLBACK_URL);
 
-			return res.redirect(authUrl);
+		const r = await fetch(url.toString(), {
+			method: "GET",
+			headers: {
+				...authHeader,
+			},
 		});
+
+		const text = await r.text();
+		if (!r.ok) {
+			return res.status(500).send(`Request token failed: HTTP ${r.status}\n\n${text}`);
+		}
+
+		// Response is querystring: oauth_token=...&oauth_token_secret=...&xoauth_request_auth_url=...
+		const params = new URLSearchParams(text);
+		const token = params.get("oauth_token");
+		const tokenSecret = params.get("oauth_token_secret");
+
+		if (!token || !tokenSecret) {
+			return res.status(500).send(`Unexpected response from Yahoo:\n\n${text}`);
+		}
+
+		await pool.query(
+			`INSERT INTO yahoo_request_tokens (oauth_token, oauth_token_secret)
+			 VALUES ($1, $2)
+			 ON CONFLICT (oauth_token) DO UPDATE SET oauth_token_secret = EXCLUDED.oauth_token_secret`,
+			[token, tokenSecret]
+		);
+
+		// Send you to Yahoo approval page
+		const approveUrl = `${YAHOO_AUTHORIZE_URL}?oauth_token=${encodeURIComponent(token)}`;
+		return res.redirect(approveUrl);
 	} catch (err) {
 		console.error(err);
-		res.status(500).send(`Error: ${err.message || String(err)}`);
+		return res.status(500).send(`Error: ${err.message || String(err)}`);
 	}
 });
 
 /**
- * Yahoo OAuth: step 2 (callback)
- * - receives oauth_token + oauth_verifier
- * - exchanges for access token
- * - saves access token to Postgres
+ * ------------------------
+ * Yahoo OAuth step 2: callback
+ * ------------------------
+ * Yahoo sends you back with:
+ * - oauth_token (the request token)
+ * - oauth_verifier
+ *
+ * We look up the stored request token secret, then exchange for access token + secret.
  */
 app.get("/callback/yahoo", async (req, res) => {
 	try {
@@ -224,6 +256,7 @@ app.get("/callback/yahoo", async (req, res) => {
 
 		await ensureTables();
 
+		// Look up request token secret
 		const { rows } = await pool.query(
 			`SELECT oauth_token_secret FROM yahoo_request_tokens WHERE oauth_token = $1`,
 			[String(oauth_token)]
@@ -233,51 +266,63 @@ app.get("/callback/yahoo", async (req, res) => {
 
 		const requestTokenSecret = rows[0].oauth_token_secret;
 
-		oauth.getOAuthAccessToken(
-			String(oauth_token),
-			requestTokenSecret,
-			String(oauth_verifier),
-			async (err, accessToken, accessTokenSecret, results) => {
-				if (err) {
-					console.error("Yahoo access token error:", err);
-					const statusCode = err.statusCode || err.status_code || err.code;
-					const data = err.data || err.body || err.response || err;
-					return res
-						.status(500)
-						.send(
-							`Failed to get access token.\n\nstatusCode=${statusCode}\n\n` +
-								`details=${typeof data === "string" ? data : JSON.stringify(data, null, 2)}`
-						);
-				}
+		// Sign access token request (GET) with verifier
+		const requestData = {
+			url: YAHOO_ACCESS_TOKEN_URL,
+			method: "GET",
+			data: { oauth_verifier: String(oauth_verifier) },
+		};
 
-				const sessionHandle = results?.oauth_session_handle;
-
-				await saveYahooTokens({
-					token: accessToken,
-					tokenSecret: accessTokenSecret,
-					sessionHandle,
-				});
-
-				res.send("Yahoo connected ✅ Tokens saved. Next: visit /yahoo/token-status");
-			}
+		const authHeader = yahooOAuth.toHeader(
+			yahooOAuth.authorize(requestData, {
+				key: String(oauth_token),
+				secret: requestTokenSecret,
+			})
 		);
+
+		const url = new URL(YAHOO_ACCESS_TOKEN_URL);
+		url.searchParams.set("oauth_verifier", String(oauth_verifier));
+
+		const r = await fetch(url.toString(), {
+			method: "GET",
+			headers: { ...authHeader },
+		});
+
+		const text = await r.text();
+		if (!r.ok) {
+			return res.status(500).send(`Access token failed: HTTP ${r.status}\n\n${text}`);
+		}
+
+		const params = new URLSearchParams(text);
+		const accessToken = params.get("oauth_token");
+		const accessTokenSecret = params.get("oauth_token_secret");
+		const sessionHandle = params.get("oauth_session_handle");
+
+		if (!accessToken || !accessTokenSecret) {
+			return res.status(500).send(`Unexpected response from Yahoo:\n\n${text}`);
+		}
+
+		await saveYahooTokens({
+			token: accessToken,
+			tokenSecret: accessTokenSecret,
+			sessionHandle,
+		});
+
+		return res.send("Yahoo connected ✅ Tokens saved. Next: visit /yahoo/token-status");
 	} catch (err) {
 		console.error(err);
-		res.status(500).send(`Error: ${err.message || String(err)}`);
+		return res.status(500).send(`Error: ${err.message || String(err)}`);
 	}
 });
 
-/**
- * Sanity check: do we have tokens stored?
- */
 app.get("/yahoo/token-status", async (req, res) => {
 	try {
 		const t = await getYahooTokens();
 		if (!t) return res.status(404).send("No Yahoo tokens saved yet. Go to /connect/yahoo first.");
-		res.send("Yahoo tokens are saved ✅");
+		return res.send("Yahoo tokens are saved ✅");
 	} catch (err) {
 		console.error(err);
-		res.status(500).send(`Error: ${err.message || String(err)}`);
+		return res.status(500).send(`Error: ${err.message || String(err)}`);
 	}
 });
 
