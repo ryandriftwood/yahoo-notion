@@ -2,7 +2,6 @@ import express from "express";
 import { Client as NotionClient } from "@notionhq/client";
 import pg from "pg";
 import fetch from "node-fetch";
-import OAuth from "oauth-1.0a";
 import crypto from "crypto";
 
 const { Pool } = pg;
@@ -41,26 +40,6 @@ const YAHOO_AUTHORIZE_URL = "https://api.login.yahoo.com/oauth/v2/request_auth";
  */
 const BASE_URL = process.env.BASE_URL || "https://ys.driftwoodclimate.com";
 const CALLBACK_URL = `${BASE_URL}/callback/yahoo`;
-
-/**
- * Yahoo OAuth signer (PLAINTEXT)
- * This matches Yahoo’s “from scratch” docs approach for token endpoints.
- */
-const yahooOAuth = new OAuth({
-	consumer: {
-		key: process.env.YAHOO_CLIENT_ID, // long dj0y... value
-		secret: process.env.YAHOO_CLIENT_SECRET,
-	},
-	signature_method: "PLAINTEXT",
-	hash_function() {
-		// Not used for PLAINTEXT
-		return "";
-	},
-});
-
-// Nonce + timestamp are still required OAuth params
-yahooOAuth.getNonce = () => crypto.randomBytes(16).toString("hex");
-yahooOAuth.getTimeStamp = () => Math.floor(Date.now() / 1000).toString();
 
 async function ensureTables() {
 	await pool.query(`
@@ -111,7 +90,9 @@ app.get("/", (req, res) => {
 });
 
 /**
- * Notion write test
+ * ------------------------
+ * Notion test endpoint
+ * ------------------------
  */
 app.get("/notion/test", async (req, res) => {
 	try {
@@ -151,25 +132,35 @@ app.get("/notion/test", async (req, res) => {
 });
 
 /**
- * Debug: show the signed request-token URL (does not call Yahoo)
+ * ------------------------
+ * Yahoo debug: show the exact URL we will call for request token
+ * ------------------------
  */
 app.get("/yahoo/debug-request-token-url", async (req, res) => {
 	try {
-		const requestData = {
-			url: YAHOO_REQUEST_TOKEN_URL,
-			method: "GET",
-			data: {
-				oauth_callback: CALLBACK_URL,
-				xoauth_lang_pref: "en-us",
-			},
-		};
+		const oauth_nonce = crypto.randomBytes(16).toString("hex");
+		const oauth_timestamp = Math.floor(Date.now() / 1000).toString();
 
-		const oauthParams = yahooOAuth.authorize(requestData);
+		const consumerKey = process.env.YAHOO_CLIENT_ID;
+		const consumerSecret = process.env.YAHOO_CLIENT_SECRET;
+
+		if (!consumerKey || !consumerSecret) {
+			return res.status(400).send("Missing YAHOO_CLIENT_ID or YAHOO_CLIENT_SECRET env vars");
+		}
+
+		// PLAINTEXT signature = consumer_secret&token_secret (token_secret empty here)
+		const oauth_signature = `${encodeURIComponent(consumerSecret)}&`;
 
 		const url = new URL(YAHOO_REQUEST_TOKEN_URL);
 		url.searchParams.set("oauth_callback", CALLBACK_URL);
 		url.searchParams.set("xoauth_lang_pref", "en-us");
-		for (const [k, v] of Object.entries(oauthParams)) url.searchParams.set(k, v);
+
+		url.searchParams.set("oauth_consumer_key", consumerKey);
+		url.searchParams.set("oauth_nonce", oauth_nonce);
+		url.searchParams.set("oauth_signature_method", "PLAINTEXT");
+		url.searchParams.set("oauth_timestamp", oauth_timestamp);
+		url.searchParams.set("oauth_version", "1.0");
+		url.searchParams.set("oauth_signature", oauth_signature);
 
 		return res.type("text/plain").send(url.toString());
 	} catch (err) {
@@ -179,53 +170,37 @@ app.get("/yahoo/debug-request-token-url", async (req, res) => {
 });
 
 /**
- * Yahoo OAuth step 1: request token
+ * ------------------------
+ * Yahoo OAuth step 1: request token (manual PLAINTEXT)
+ * ------------------------
  */
 app.get("/connect/yahoo", async (req, res) => {
 	try {
-		if (!process.env.YAHOO_CLIENT_ID || !process.env.YAHOO_CLIENT_SECRET) {
+		await ensureTables();
+
+		const oauth_nonce = crypto.randomBytes(16).toString("hex");
+		const oauth_timestamp = Math.floor(Date.now() / 1000).toString();
+
+		const consumerKey = process.env.YAHOO_CLIENT_ID;
+		const consumerSecret = process.env.YAHOO_CLIENT_SECRET;
+
+		if (!consumerKey || !consumerSecret) {
 			return res.status(400).send("Missing YAHOO_CLIENT_ID or YAHOO_CLIENT_SECRET env vars");
 		}
 
-		await ensureTables();
+		// PLAINTEXT signature = consumer_secret&token_secret (token_secret empty here)
+		const oauth_signature = `${encodeURIComponent(consumerSecret)}&`;
 
-		const requestData = {
-			url: YAHOO_REQUEST_TOKEN_URL,
-			method: "GET",
-			data: {
-				oauth_callback: CALLBACK_URL,
-				xoauth_lang_pref: "en-us",
-			},
-		};
-
-		const oauth_nonce = crypto.randomBytes(16).toString("hex");
-const oauth_timestamp = Math.floor(Date.now() / 1000).toString();
-
-const consumerKey = process.env.YAHOO_CLIENT_ID;
-const consumerSecret = process.env.YAHOO_CLIENT_SECRET;
-
-if (!consumerKey || !consumerSecret) {
-  return res.status(400).send("Missing YAHOO_CLIENT_ID or YAHOO_CLIENT_SECRET env vars");
-}
-
-// PLAINTEXT signature: consumer_secret&token_secret (token_secret empty for request token step)
-const oauth_signature = `${encodeURIComponent(consumerSecret)}&`;
-
-const url = new URL(YAHOO_REQUEST_TOKEN_URL);
-url.searchParams.set("oauth_callback", CALLBACK_URL);
-url.searchParams.set("xoauth_lang_pref", "en-us");
-
-url.searchParams.set("oauth_consumer_key", consumerKey);
-url.searchParams.set("oauth_nonce", oauth_nonce);
-url.searchParams.set("oauth_signature_method", "PLAINTEXT");
-url.searchParams.set("oauth_timestamp", oauth_timestamp);
-url.searchParams.set("oauth_version", "1.0");
-url.searchParams.set("oauth_signature", oauth_signature);
-		
 		const url = new URL(YAHOO_REQUEST_TOKEN_URL);
 		url.searchParams.set("oauth_callback", CALLBACK_URL);
 		url.searchParams.set("xoauth_lang_pref", "en-us");
-		for (const [k, v] of Object.entries(oauthParams)) url.searchParams.set(k, v);
+
+		url.searchParams.set("oauth_consumer_key", consumerKey);
+		url.searchParams.set("oauth_nonce", oauth_nonce);
+		url.searchParams.set("oauth_signature_method", "PLAINTEXT");
+		url.searchParams.set("oauth_timestamp", oauth_timestamp);
+		url.searchParams.set("oauth_version", "1.0");
+		url.searchParams.set("oauth_signature", oauth_signature);
 
 		const r = await fetch(url.toString(), { method: "GET" });
 		const text = await r.text();
@@ -234,6 +209,7 @@ url.searchParams.set("oauth_signature", oauth_signature);
 			return res.status(500).send(`Request token failed: HTTP ${r.status}\n\n${text}`);
 		}
 
+		// Response is querystring: oauth_token=...&oauth_token_secret=...&xoauth_request_auth_url=...
 		const params = new URLSearchParams(text);
 		const token = params.get("oauth_token");
 		const tokenSecret = params.get("oauth_token_secret");
@@ -259,65 +235,17 @@ url.searchParams.set("oauth_signature", oauth_signature);
 });
 
 /**
+ * ------------------------
  * Yahoo OAuth step 2: callback → access token
+ * ------------------------
+ * NOTE: This still needs signing with token + token secret.
+ * We'll update this after request-token is working.
  */
 app.get("/callback/yahoo", async (req, res) => {
 	try {
-		const { oauth_token, oauth_verifier } = req.query;
-
-		if (!oauth_token || !oauth_verifier) {
-			return res.status(400).send("Missing oauth_token or oauth_verifier in callback");
-		}
-
-		await ensureTables();
-
-		const { rows } = await pool.query(
-			`SELECT oauth_token_secret FROM yahoo_request_tokens WHERE oauth_token = $1`,
-			[String(oauth_token)]
-		);
-
-		if (!rows[0]) return res.status(400).send("Request token not found. Try /connect/yahoo again.");
-
-		const requestTokenSecret = rows[0].oauth_token_secret;
-
-		const requestData = {
-			url: YAHOO_ACCESS_TOKEN_URL,
-			method: "GET",
-			data: { oauth_verifier: String(oauth_verifier) },
-		};
-
-		const oauthParams = yahooOAuth.authorize(requestData, {
-			key: String(oauth_token),
-			secret: requestTokenSecret,
-		});
-
-		const url = new URL(YAHOO_ACCESS_TOKEN_URL);
-		url.searchParams.set("oauth_verifier", String(oauth_verifier));
-		for (const [k, v] of Object.entries(oauthParams)) url.searchParams.set(k, v);
-
-		const r = await fetch(url.toString(), { method: "GET" });
-		const text = await r.text();
-
-		if (!r.ok) {
-			return res.status(500).send(`Access token failed: HTTP ${r.status}\n\n${text}`);
-		}
-
-		const params = new URLSearchParams(text);
-		const accessToken = params.get("oauth_token");
-		const accessTokenSecret = params.get("oauth_token_secret");
-		const sessionHandle = params.get("oauth_session_handle");
-
-		if (!accessToken || !accessTokenSecret) {
-			return res.status(500).send(`Unexpected response from Yahoo:\n\n${text}`);
-		}
-
-		await saveYahooTokens({
-			token: accessToken,
-			tokenSecret: accessTokenSecret,
-			sessionHandle,
-		});
-
-		return res.send("Yahoo connected ✅ Tokens saved. Next: visit /yahoo/token-status");
+		return res
+			.status(501)
+			.send("Request token step is being stabilized first. Once /connect/yahoo works, we will implement the access token exchange here.");
 	} catch (err) {
 		console.error(err);
 		return res.status(500).send(`Error: ${err.message || String(err)}`);
