@@ -41,6 +41,9 @@ const oauth = new OAuth(
 	"HMAC-SHA1"
 );
 
+oauth._requestTokenHttpMethod = "GET";
+oauth._accessTokenHttpMethod = "GET";
+
 async function ensureTables() {
 	await pool.query(`
 		CREATE TABLE IF NOT EXISTS yahoo_tokens (
