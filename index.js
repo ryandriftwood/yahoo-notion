@@ -34,6 +34,10 @@ const pool = new Pool({
  */
 const YAHOO_REQUEST_TOKEN_URL = "https://api.login.yahoo.com/oauth/v2/get_request_token";
 const YAHOO_ACCESS_TOKEN_URL = "https://api.login.yahoo.com/oauth/v2/get_token";
+
+/**
+ * This is the user approval page for OAuth1 request tokens
+ */
 const YAHOO_AUTHORIZE_URL = "https://api.login.yahoo.com/oauth/v2/request_auth";
 
 /**
@@ -186,34 +190,34 @@ app.get("/connect/yahoo", async (req, res) => {
 
 		await ensureTables();
 
-		// We sign a GET request that includes oauth_callback
-		// Build OAuth params
-const requestData = {
-  url: YAHOO_REQUEST_TOKEN_URL,
-  method: "GET",
-  data: { oauth_callback: CALLBACK_URL },
-};
+		// Build OAuth params for request token
+		const requestData = {
+			url: YAHOO_REQUEST_TOKEN_URL,
+			method: "GET",
+			data: { oauth_callback: CALLBACK_URL },
+		};
 
-const oauthParams = yahooOAuth.authorize(requestData);
+		const oauthParams = yahooOAuth.authorize(requestData);
 
-// Put *all* oauth params in query string
-const url = new URL(YAHOO_REQUEST_TOKEN_URL);
-url.searchParams.set("oauth_callback", CALLBACK_URL);
-for (const [k, v] of Object.entries(oauthParams)) {
-  url.searchParams.set(k, v);
-}
+		// Put ALL oauth params into the query string (more reliable with Yahoo)
+		const url = new URL(YAHOO_REQUEST_TOKEN_URL);
+		url.searchParams.set("oauth_callback", CALLBACK_URL);
+		for (const [k, v] of Object.entries(oauthParams)) {
+			url.searchParams.set(k, v);
+		}
 
-const r = await fetch(url.toString(), { method: "GET" });
-const text = await r.text();
+		const r = await fetch(url.toString(), { method: "GET" });
+		const text = await r.text();
 
-if (!r.ok) {
-  return res.status(500).send(`Request token failed: HTTP ${r.status}\n\n${text}`);
-}
+		if (!r.ok) {
+			return res.status(500).send(`Request token failed: HTTP ${r.status}\n\n${text}`);
+		}
 
 		// Response is querystring: oauth_token=...&oauth_token_secret=...&xoauth_request_auth_url=...
 		const params = new URLSearchParams(text);
 		const token = params.get("oauth_token");
 		const tokenSecret = params.get("oauth_token_secret");
+		const authUrlFromYahoo = params.get("xoauth_request_auth_url");
 
 		if (!token || !tokenSecret) {
 			return res.status(500).send(`Unexpected response from Yahoo:\n\n${text}`);
@@ -226,8 +230,8 @@ if (!r.ok) {
 			[token, tokenSecret]
 		);
 
-		// Send you to Yahoo approval page
-		const approveUrl = `${YAHOO_AUTHORIZE_URL}?oauth_token=${encodeURIComponent(token)}`;
+		// Prefer Yahoo-provided auth URL if present
+		const approveUrl = authUrlFromYahoo || `${YAHOO_AUTHORIZE_URL}?oauth_token=${encodeURIComponent(token)}`;
 		return res.redirect(approveUrl);
 	} catch (err) {
 		console.error(err);
@@ -265,33 +269,33 @@ app.get("/callback/yahoo", async (req, res) => {
 
 		const requestTokenSecret = rows[0].oauth_token_secret;
 
-		// Sign access token request (GET) with verifier
+		// Build OAuth params for access token exchange
 		const requestData = {
 			url: YAHOO_ACCESS_TOKEN_URL,
 			method: "GET",
 			data: { oauth_verifier: String(oauth_verifier) },
 		};
 
-		const authHeader = yahooOAuth.toHeader(
-			yahooOAuth.authorize(requestData, {
-				key: String(oauth_token),
-				secret: requestTokenSecret,
-			})
-		);
-
-		const url = new URL(YAHOO_ACCESS_TOKEN_URL);
-		url.searchParams.set("oauth_verifier", String(oauth_verifier));
-
-		const r = await fetch(url.toString(), {
-			method: "GET",
-			headers: { ...authHeader },
+		const oauthParams = yahooOAuth.authorize(requestData, {
+			key: String(oauth_token),
+			secret: requestTokenSecret,
 		});
 
+		// Put ALL oauth params into query string
+		const url = new URL(YAHOO_ACCESS_TOKEN_URL);
+		url.searchParams.set("oauth_verifier", String(oauth_verifier));
+		for (const [k, v] of Object.entries(oauthParams)) {
+			url.searchParams.set(k, v);
+		}
+
+		const r = await fetch(url.toString(), { method: "GET" });
 		const text = await r.text();
+
 		if (!r.ok) {
 			return res.status(500).send(`Access token failed: HTTP ${r.status}\n\n${text}`);
 		}
 
+		// Response is querystring: oauth_token=...&oauth_token_secret=...&oauth_session_handle=...
 		const params = new URLSearchParams(text);
 		const accessToken = params.get("oauth_token");
 		const accessTokenSecret = params.get("oauth_token_secret");
