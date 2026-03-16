@@ -188,9 +188,6 @@ app.get("/connect/yahoo", async (req, res) => {
 			return res.status(400).send("Missing YAHOO_CLIENT_ID or YAHOO_CLIENT_SECRET env vars");
 		}
 
-		await ensureTables();
-
-		// Build OAuth params for request token
 		const requestData = {
 			url: YAHOO_REQUEST_TOKEN_URL,
 			method: "GET",
@@ -199,46 +196,24 @@ app.get("/connect/yahoo", async (req, res) => {
 
 		const oauthParams = yahooOAuth.authorize(requestData);
 
-		// Put ALL oauth params into the query string (more reliable with Yahoo)
 		const url = new URL(YAHOO_REQUEST_TOKEN_URL);
 		url.searchParams.set("oauth_callback", CALLBACK_URL);
 		for (const [k, v] of Object.entries(oauthParams)) {
 			url.searchParams.set(k, v);
 		}
 
-		const r = await fetch(url.toString(), { method: "GET" });
-		const text = await r.text();
-
-		if (!r.ok) {
-			return res.status(500).send(`Request token failed: HTTP ${r.status}\n\n${text}`);
-		}
-
-		// Response is querystring: oauth_token=...&oauth_token_secret=...&xoauth_request_auth_url=...
-		const params = new URLSearchParams(text);
-		const token = params.get("oauth_token");
-		const tokenSecret = params.get("oauth_token_secret");
-		const authUrlFromYahoo = params.get("xoauth_request_auth_url");
-
-		if (!token || !tokenSecret) {
-			return res.status(500).send(`Unexpected response from Yahoo:\n\n${text}`);
-		}
-
-		await pool.query(
-			`INSERT INTO yahoo_request_tokens (oauth_token, oauth_token_secret)
-			 VALUES ($1, $2)
-			 ON CONFLICT (oauth_token) DO UPDATE SET oauth_token_secret = EXCLUDED.oauth_token_secret`,
-			[token, tokenSecret]
+		return res.type("text/plain").send(
+			[
+				`CALLBACK_URL=${CALLBACK_URL}`,
+				`YAHOO_CLIENT_ID_START=${process.env.YAHOO_CLIENT_ID.slice(0, 12)}`,
+				`REQUEST_URL=${url.toString()}`,
+			].join("\n\n")
 		);
-
-		// Prefer Yahoo-provided auth URL if present
-		const approveUrl = authUrlFromYahoo || `${YAHOO_AUTHORIZE_URL}?oauth_token=${encodeURIComponent(token)}`;
-		return res.redirect(approveUrl);
 	} catch (err) {
 		console.error(err);
 		return res.status(500).send(`Error: ${err.message || String(err)}`);
 	}
 });
-
 /**
  * ------------------------
  * Yahoo OAuth step 2: callback
