@@ -34,10 +34,6 @@ const pool = new Pool({
  */
 const YAHOO_REQUEST_TOKEN_URL = "https://api.login.yahoo.com/oauth/v2/get_request_token";
 const YAHOO_ACCESS_TOKEN_URL = "https://api.login.yahoo.com/oauth/v2/get_token";
-
-/**
- * This is the user approval page for OAuth1 request tokens
- */
 const YAHOO_AUTHORIZE_URL = "https://api.login.yahoo.com/oauth/v2/request_auth";
 
 /**
@@ -62,7 +58,12 @@ const yahooOAuth = new OAuth({
 	hash_function(base_string, key) {
 		return crypto.createHmac("sha1", key).update(base_string).digest("base64");
 	},
+	nonce_length: 32,
 });
+
+// Force correct nonce + timestamp generation (fixes bad oauth_timestamp)
+yahooOAuth.getNonce = () => crypto.randomBytes(16).toString("hex");
+yahooOAuth.getTimeStamp = () => Math.floor(Date.now() / 1000).toString();
 
 async function ensureTables() {
 	await pool.query(`
@@ -172,40 +173,31 @@ app.get("/notion/test", async (req, res) => {
 
 /**
  * ------------------------
- * Yahoo OAuth step 1: connect
+ * Yahoo debug endpoint: prints the exact signed URL (no Yahoo call)
  * ------------------------
- * This requests a request token, stores it, then redirects you to Yahoo to approve.
- *
- * Required env vars:
- * - YAHOO_CLIENT_ID
- * - YAHOO_CLIENT_SECRET
- * - DATABASE_URL
- * - BASE_URL (recommended)
  */
-app.get("/connect/yahoo", async (req, res) => {
+app.get("/yahoo/debug-request-token-url", async (req, res) => {
 	try {
-		if (!process.env.YAHOO_CLIENT_ID || !process.env.YAHOO_CLIENT_SECRET) {
-			return res.status(400).send("Missing YAHOO_CLIENT_ID or YAHOO_CLIENT_SECRET env vars");
-		}
-
 		const requestData = {
 			url: YAHOO_REQUEST_TOKEN_URL,
 			method: "GET",
-			data: { oauth_callback: CALLBACK_URL },
+			data: {
+				oauth_callback: CALLBACK_URL,
+				xoauth_lang_pref: "en-us",
+			},
 		};
 
 		const oauthParams = yahooOAuth.authorize(requestData);
 
 		const url = new URL(YAHOO_REQUEST_TOKEN_URL);
 		url.searchParams.set("oauth_callback", CALLBACK_URL);
-		for (const [k, v] of Object.entries(oauthParams)) {
-			url.searchParams.set(k, v);
-		}
+		url.searchParams.set("xoauth_lang_pref", "en-us");
+		for (const [k, v] of Object.entries(oauthParams)) url.searchParams.set(k, v);
 
 		return res.type("text/plain").send(
 			[
 				`CALLBACK_URL=${CALLBACK_URL}`,
-				`YAHOO_CLIENT_ID_START=${process.env.YAHOO_CLIENT_ID.slice(0, 12)}`,
+				`YAHOO_CLIENT_ID_START=${(process.env.YAHOO_CLIENT_ID || "").slice(0, 12)}`,
 				`REQUEST_URL=${url.toString()}`,
 			].join("\n\n")
 		);
@@ -214,15 +206,77 @@ app.get("/connect/yahoo", async (req, res) => {
 		return res.status(500).send(`Error: ${err.message || String(err)}`);
 	}
 });
+
+/**
+ * ------------------------
+ * Yahoo OAuth step 1: connect
+ * ------------------------
+ * Requests a request token, stores it, redirects you to Yahoo approval page.
+ */
+app.get("/connect/yahoo", async (req, res) => {
+	try {
+		if (!process.env.YAHOO_CLIENT_ID || !process.env.YAHOO_CLIENT_SECRET) {
+			return res.status(400).send("Missing YAHOO_CLIENT_ID or YAHOO_CLIENT_SECRET env vars");
+		}
+
+		await ensureTables();
+
+		const requestData = {
+			url: YAHOO_REQUEST_TOKEN_URL,
+			method: "GET",
+			data: {
+				oauth_callback: CALLBACK_URL,
+				xoauth_lang_pref: "en-us",
+			},
+		};
+
+		const oauthParams = yahooOAuth.authorize(requestData);
+
+		// Put ALL oauth params in query string (more reliable with Yahoo)
+		const url = new URL(YAHOO_REQUEST_TOKEN_URL);
+		url.searchParams.set("oauth_callback", CALLBACK_URL);
+		url.searchParams.set("xoauth_lang_pref", "en-us");
+		for (const [k, v] of Object.entries(oauthParams)) {
+			url.searchParams.set(k, v);
+		}
+
+		const r = await fetch(url.toString(), { method: "GET" });
+		const text = await r.text();
+
+		if (!r.ok) {
+			return res.status(500).send(`Request token failed: HTTP ${r.status}\n\n${text}`);
+		}
+
+		// Response is querystring
+		const params = new URLSearchParams(text);
+		const token = params.get("oauth_token");
+		const tokenSecret = params.get("oauth_token_secret");
+		const authUrlFromYahoo = params.get("xoauth_request_auth_url");
+
+		if (!token || !tokenSecret) {
+			return res.status(500).send(`Unexpected response from Yahoo:\n\n${text}`);
+		}
+
+		await pool.query(
+			`INSERT INTO yahoo_request_tokens (oauth_token, oauth_token_secret)
+			 VALUES ($1, $2)
+			 ON CONFLICT (oauth_token) DO UPDATE SET oauth_token_secret = EXCLUDED.oauth_token_secret`,
+			[token, tokenSecret]
+		);
+
+		const approveUrl = authUrlFromYahoo || `${YAHOO_AUTHORIZE_URL}?oauth_token=${encodeURIComponent(token)}`;
+		return res.redirect(approveUrl);
+	} catch (err) {
+		console.error(err);
+		return res.status(500).send(`Error: ${err.message || String(err)}`);
+	}
+});
+
 /**
  * ------------------------
  * Yahoo OAuth step 2: callback
  * ------------------------
- * Yahoo sends you back with:
- * - oauth_token (the request token)
- * - oauth_verifier
- *
- * We look up the stored request token secret, then exchange for access token + secret.
+ * Exchanges request token + verifier for access token, stores it.
  */
 app.get("/callback/yahoo", async (req, res) => {
 	try {
@@ -234,7 +288,6 @@ app.get("/callback/yahoo", async (req, res) => {
 
 		await ensureTables();
 
-		// Look up request token secret
 		const { rows } = await pool.query(
 			`SELECT oauth_token_secret FROM yahoo_request_tokens WHERE oauth_token = $1`,
 			[String(oauth_token)]
@@ -244,7 +297,6 @@ app.get("/callback/yahoo", async (req, res) => {
 
 		const requestTokenSecret = rows[0].oauth_token_secret;
 
-		// Build OAuth params for access token exchange
 		const requestData = {
 			url: YAHOO_ACCESS_TOKEN_URL,
 			method: "GET",
@@ -256,7 +308,6 @@ app.get("/callback/yahoo", async (req, res) => {
 			secret: requestTokenSecret,
 		});
 
-		// Put ALL oauth params into query string
 		const url = new URL(YAHOO_ACCESS_TOKEN_URL);
 		url.searchParams.set("oauth_verifier", String(oauth_verifier));
 		for (const [k, v] of Object.entries(oauthParams)) {
@@ -270,7 +321,6 @@ app.get("/callback/yahoo", async (req, res) => {
 			return res.status(500).send(`Access token failed: HTTP ${r.status}\n\n${text}`);
 		}
 
-		// Response is querystring: oauth_token=...&oauth_token_secret=...&oauth_session_handle=...
 		const params = new URLSearchParams(text);
 		const accessToken = params.get("oauth_token");
 		const accessTokenSecret = params.get("oauth_token_secret");
