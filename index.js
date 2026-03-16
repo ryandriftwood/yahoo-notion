@@ -198,8 +198,30 @@ app.get("/connect/yahoo", async (req, res) => {
 			},
 		};
 
-		const oauthParams = yahooOAuth.authorize(requestData);
+		const oauth_nonce = crypto.randomBytes(16).toString("hex");
+const oauth_timestamp = Math.floor(Date.now() / 1000).toString();
 
+const consumerKey = process.env.YAHOO_CLIENT_ID;
+const consumerSecret = process.env.YAHOO_CLIENT_SECRET;
+
+if (!consumerKey || !consumerSecret) {
+  return res.status(400).send("Missing YAHOO_CLIENT_ID or YAHOO_CLIENT_SECRET env vars");
+}
+
+// PLAINTEXT signature: consumer_secret&token_secret (token_secret empty for request token step)
+const oauth_signature = `${encodeURIComponent(consumerSecret)}&`;
+
+const url = new URL(YAHOO_REQUEST_TOKEN_URL);
+url.searchParams.set("oauth_callback", CALLBACK_URL);
+url.searchParams.set("xoauth_lang_pref", "en-us");
+
+url.searchParams.set("oauth_consumer_key", consumerKey);
+url.searchParams.set("oauth_nonce", oauth_nonce);
+url.searchParams.set("oauth_signature_method", "PLAINTEXT");
+url.searchParams.set("oauth_timestamp", oauth_timestamp);
+url.searchParams.set("oauth_version", "1.0");
+url.searchParams.set("oauth_signature", oauth_signature);
+		
 		const url = new URL(YAHOO_REQUEST_TOKEN_URL);
 		url.searchParams.set("oauth_callback", CALLBACK_URL);
 		url.searchParams.set("xoauth_lang_pref", "en-us");
