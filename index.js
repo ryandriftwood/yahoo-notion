@@ -89,6 +89,14 @@ app.get("/", (req, res) => {
 	res.send("ok");
 });
 
+app.get("/debug/time", (req, res) => {
+  res.type("text/plain").send(
+    `Date.now()=${Date.now()}\n` +
+    `epochSeconds=${Math.floor(Date.now() / 1000)}\n` +
+    `iso=${new Date().toISOString()}\n`
+  );
+});
+
 /**
  * ------------------------
  * Notion test endpoint
