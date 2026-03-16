@@ -160,6 +160,21 @@ app.get("/connect/yahoo", async (req, res) => {
 
 		await ensureTables();
 
+return res.send(
+  JSON.stringify(
+    {
+      requestTokenUrl: YAHOO_REQUEST_TOKEN_URL,
+      accessTokenUrl: YAHOO_ACCESS_TOKEN_URL,
+      callbackUrl: CALLBACK_URL,
+      hasClientId: Boolean(process.env.YAHOO_CLIENT_ID),
+      hasClientSecret: Boolean(process.env.YAHOO_CLIENT_SECRET),
+      clientIdStartsWith: process.env.YAHOO_CLIENT_ID?.slice(0, 10) || null
+    },
+    null,
+    2
+  )
+);
+		
 		// Force callback param explicitly
 		oauth.getOAuthRequestToken({ oauth_callback: CALLBACK_URL }, async (err, token, tokenSecret, results) => {
 			if (err) {
