@@ -187,29 +187,28 @@ app.get("/connect/yahoo", async (req, res) => {
 		await ensureTables();
 
 		// We sign a GET request that includes oauth_callback
-		const requestData = {
-			url: YAHOO_REQUEST_TOKEN_URL,
-			method: "GET",
-			data: { oauth_callback: CALLBACK_URL },
-		};
+		// Build OAuth params
+const requestData = {
+  url: YAHOO_REQUEST_TOKEN_URL,
+  method: "GET",
+  data: { oauth_callback: CALLBACK_URL },
+};
 
-		const authHeader = yahooOAuth.toHeader(yahooOAuth.authorize(requestData));
+const oauthParams = yahooOAuth.authorize(requestData);
 
-		// Build URL with query param
-		const url = new URL(YAHOO_REQUEST_TOKEN_URL);
-		url.searchParams.set("oauth_callback", CALLBACK_URL);
+// Put *all* oauth params in query string
+const url = new URL(YAHOO_REQUEST_TOKEN_URL);
+url.searchParams.set("oauth_callback", CALLBACK_URL);
+for (const [k, v] of Object.entries(oauthParams)) {
+  url.searchParams.set(k, v);
+}
 
-		const r = await fetch(url.toString(), {
-			method: "GET",
-			headers: {
-				...authHeader,
-			},
-		});
+const r = await fetch(url.toString(), { method: "GET" });
+const text = await r.text();
 
-		const text = await r.text();
-		if (!r.ok) {
-			return res.status(500).send(`Request token failed: HTTP ${r.status}\n\n${text}`);
-		}
+if (!r.ok) {
+  return res.status(500).send(`Request token failed: HTTP ${r.status}\n\n${text}`);
+}
 
 		// Response is querystring: oauth_token=...&oauth_token_secret=...&xoauth_request_auth_url=...
 		const params = new URLSearchParams(text);
