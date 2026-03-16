@@ -120,8 +120,9 @@ app.get("/connect/yahoo", async (req, res) => {
 			return res.status(400).send("Missing YAHOO_CLIENT_ID or YAHOO_CLIENT_SECRET env vars");
 		}
 
-		oauth.getOAuthRequestToken((err, token, tokenSecret, results) => 
-			if (err) {console.error("Yahoo request token error:", err);
+		oauth.getOAuthRequestToken((err, token, tokenSecret, results) => {
+			if (err) {
+  console.error("Yahoo request token error:", err);
 
   // Try to pull out useful details
   const statusCode = err.statusCode || err.status_code || err.code;
@@ -133,6 +134,7 @@ app.get("/connect/yahoo", async (req, res) => {
       `details=${typeof data === "string" ? data : JSON.stringify(data, null, 2)}`
     );
 }
+
 			// Redirect user to Yahoo authorization page
 			const authUrl = results?.xoauth_request_auth_url;
 			if (!authUrl) return res.status(500).send("Yahoo did not return xoauth_request_auth_url");
