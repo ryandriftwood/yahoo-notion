@@ -2,19 +2,30 @@ import express from "express";
 import axios from "axios";
 import pg from "pg";
 import { Client as NotionClient } from "@notionhq/client";
+import { parseStringPromise } from "xml2js";
 
 const { Pool } = pg;
 const app = express();
 
+/**
+ * Env vars required:
+ * - BASE_URL = https://ys.driftwoodclimate.com
+ * - YAHOO_CONSUMER_KEY
+ * - YAHOO_CONSUMER_SECRET
+ * - DATABASE_URL
+ *
+ * Notion (used by /notion/test):
+ * - NOTION_TOKEN
+ * - NOTION_LEAGUE_STATE_PAGE_ID
+ * - NOTION_API_UPDATES_LOG_DATABASE_ID
+ */
 const BASE_URL = process.env.BASE_URL || "https://ys.driftwoodclimate.com";
 const OAUTH2_CALLBACK_PATH = "/callback/yahoo-oauth2";
 const REDIRECT_URI = `${BASE_URL}${OAUTH2_CALLBACK_PATH}`;
 
-// Yahoo OAuth2 endpoints (per StackOverflow approach)
 const YAHOO_OAUTH2_AUTHORIZE_URL = "https://api.login.yahoo.com/oauth2/request_auth";
 const YAHOO_OAUTH2_TOKEN_URL = "https://api.login.yahoo.com/oauth2/get_token";
 
-// Fantasy API base
 const YAHOO_FANTASY_BASE = "https://fantasysports.yahooapis.com/fantasy/v2";
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
@@ -54,7 +65,7 @@ async function saveTokens(tokenResponse) {
 
 	const now = Math.floor(Date.now() / 1000);
 	const expiresIn = tokenResponse.expires_in ? Number(tokenResponse.expires_in) : null;
-	const expiresAt = expiresIn ? now + expiresIn - 30 : null; // small buffer
+	const expiresAt = expiresIn ? now + expiresIn - 30 : null; // buffer
 
 	await pool.query(
 		`
@@ -80,7 +91,7 @@ async function saveTokens(tokenResponse) {
 	);
 }
 
-async function refreshAccessTokenIfNeeded() {
+async function ensureAccessToken() {
 	const tokens = await loadTokens();
 	if (!tokens || !tokens.refresh_token) {
 		throw new Error("No refresh_token saved yet. Go to /connect/yahoo-oauth2 first.");
@@ -112,15 +123,36 @@ async function refreshAccessTokenIfNeeded() {
 	return r.data.access_token;
 }
 
-/**
- * Home
- */
+async function yahooFantasyGet(path) {
+	const accessToken = await ensureAccessToken();
+	const url = `${YAHOO_FANTASY_BASE}/${path}`;
+	const r = await axios({
+		url,
+		method: "get",
+		headers: {
+			Authorization: `Bearer ${accessToken}`,
+			"User-Agent": "Mozilla/5.0",
+			Accept: "application/xml",
+		},
+		timeout: 10000,
+	});
+	return r.data; // XML string
+}
+
 app.get("/", (req, res) => {
 	res.type("text/plain").send("ok");
 });
 
+app.get("/debug/time", (req, res) => {
+	res.type("text/plain").send(
+		`Date.now()=${Date.now()}\n` +
+			`epochSeconds=${Math.floor(Date.now() / 1000)}\n` +
+			`iso=${new Date().toISOString()}\n`
+	);
+});
+
 /**
- * Notion test (kept)
+ * Notion write test (kept)
  */
 app.get("/notion/test", async (req, res) => {
 	try {
@@ -161,7 +193,7 @@ app.get("/notion/test", async (req, res) => {
 });
 
 /**
- * Step 1: send user to Yahoo authorize page
+ * OAuth2 connect: redirect to Yahoo
  */
 app.get("/connect/yahoo-oauth2", async (req, res) => {
 	try {
@@ -182,8 +214,7 @@ app.get("/connect/yahoo-oauth2", async (req, res) => {
 });
 
 /**
- * Step 2: Yahoo redirects back here with ?code=...
- * We immediately exchange it for tokens and store in Postgres.
+ * OAuth2 callback: exchange code -> tokens, store in Postgres
  */
 app.get(OAUTH2_CALLBACK_PATH, async (req, res) => {
 	try {
@@ -202,8 +233,6 @@ app.get(OAUTH2_CALLBACK_PATH, async (req, res) => {
 				grant_type: "authorization_code",
 				code: String(code),
 				redirect_uri: REDIRECT_URI,
-				// These two are included in the StackOverflow answer; Yahoo sometimes accepts without them,
-				// but including them is fine:
 				client_id: process.env.YAHOO_CONSUMER_KEY,
 				client_secret: process.env.YAHOO_CONSUMER_SECRET,
 			}).toString(),
@@ -214,7 +243,7 @@ app.get(OAUTH2_CALLBACK_PATH, async (req, res) => {
 
 		return res
 			.type("text/plain")
-			.send("Yahoo OAuth2 connected ✅ Tokens saved. Next: visit /yahoo/oauth2/status then /yahoo/api-test");
+			.send("Yahoo OAuth2 connected ✅ Tokens saved. Next: visit /yahoo/oauth2/status then /yahoo/discover");
 	} catch (err) {
 		console.error(err?.response?.data || err);
 		const details = err?.response?.data ? JSON.stringify(err.response.data, null, 2) : String(err);
@@ -239,27 +268,12 @@ app.get("/yahoo/oauth2/status", async (req, res) => {
 });
 
 /**
- * Test Yahoo Fantasy API call (raw XML returned)
+ * Yahoo API test: returns raw XML
  */
 app.get("/yahoo/api-test", async (req, res) => {
 	try {
-		const accessToken = await refreshAccessTokenIfNeeded();
-
-		// Simple “does Bearer work” endpoint:
-		// game/mlb usually returns metadata; you can change later.
-		const url = `${YAHOO_FANTASY_BASE}/game/mlb`;
-
-		const r = await axios({
-			url,
-			method: "get",
-			headers: {
-				Authorization: `Bearer ${accessToken}`,
-				"User-Agent": "Mozilla/5.0",
-			},
-			timeout: 10000,
-		});
-
-		res.type("text/xml").send(r.data);
+		const xml = await yahooFantasyGet("game/mlb");
+		res.type("text/xml").send(xml);
 	} catch (err) {
 		console.error(err?.response?.data || err);
 		const details = err?.response?.data ? err.response.data : String(err);
@@ -267,9 +281,57 @@ app.get("/yahoo/api-test", async (req, res) => {
 	}
 });
 
+/**
+ * Discover league + team keys (parsed JSON)
+ * Calls: users;use_login=1/games;game_keys=mlb/teams
+ */
+app.get("/yahoo/discover", async (req, res) => {
+	try {
+		const xml = await yahooFantasyGet("users;use_login=1/games;game_keys=mlb/teams");
+
+		const parsed = await parseStringPromise(xml, {
+			explicitArray: false,
+			mergeAttrs: true,
+			ignoreAttrs: false,
+		});
+
+		const fantasy = parsed?.fantasy_content;
+		const users = fantasy?.users;
+		const user = users?.user;
+
+		const games = user?.games?.game;
+		const gameList = Array.isArray(games) ? games : games ? [games] : [];
+
+		const out = [];
+
+		for (const g of gameList) {
+			const game_key = g?.game_key;
+			const game_name = g?.name;
+			const teams = g?.teams?.team;
+			const teamList = Array.isArray(teams) ? teams : teams ? [teams] : [];
+
+			for (const t of teamList) {
+				out.push({
+					game_key,
+					game_name,
+					league_key: t?.league_key || null,
+					team_key: t?.team_key || null,
+					team_name: t?.name || null,
+					team_id: t?.team_id || null,
+				});
+			}
+		}
+
+		res.json({ count: out.length, teams: out });
+	} catch (err) {
+		console.error(err?.response?.data || err);
+		const details = err?.response?.data ? err.response.data : String(err);
+		res.status(500).send(`Discover failed:\n\n${typeof details === "string" ? details : JSON.stringify(details, null, 2)}`);
+	}
+});
+
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
 	console.log(`Server running on port ${port}`);
-	console.log(`BASE_URL: ${BASE_URL}`);
 	console.log(`OAuth2 redirect URI: ${REDIRECT_URI}`);
 });
