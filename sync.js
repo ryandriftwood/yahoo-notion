@@ -33,11 +33,28 @@ export async function runSync() {
 	}
 
 	// 2) Free agents (top N)
-	const faCount = YAHOO_FREE_AGENTS_COUNT || 200;
-	const faXml = await yahooFantasyGetXml(
-		`league/${YAHOO_LEAGUE_KEY}/players;status=A;sort=rank;start=0;count=${faCount}`
+	const target = YAHOO_FREE_AGENTS_COUNT || 200;
+
+const pageSize = 25; // Yahoo often caps here
+let start = 0;
+let freeAgents = [];
+
+while (freeAgents.length < target) {
+	const remaining = target - freeAgents.length;
+	const count = Math.min(pageSize, remaining);
+
+	const xml = await yahooFantasyGetXml(
+		`league/${YAHOO_LEAGUE_KEY}/players;status=A;sort=rank;start=${start};count=${count}`
 	);
-	const freeAgents = await parseFreeAgents(faXml);
+
+	const page = await parseFreeAgents(xml);
+
+	// If Yahoo returns nothing, stop to avoid infinite loop
+	if (!page.length) break;
+
+	freeAgents = freeAgents.concat(page);
+	start += pageSize;
+}
 
 	// 3) Write to Notion (v1 appends; we’ll upgrade to true overwrite next)
 	const rostersMd =
