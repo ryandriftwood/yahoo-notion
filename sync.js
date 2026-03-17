@@ -50,12 +50,15 @@ export async function runSync() {
 			})
 			.join("\\n\\n");
 
-	const freeAgentsMd =
-		`Free agents (Top ${faCount} by Yahoo rank)\\nLast synced: ${started}\\n\\n` +
-		freeAgents.map((l) => `- ${l}`).join("\\n");
+	const header =
+  `Free agents (Top ${faCount} by Yahoo rank)\n` +
+  `Last synced: ${started}\n\n`;
+
+const body = freeAgents.join("\n"); // already "1. Name — Pos — Team" style
+
+await overwritePageWithMarkdown(NOTION_FREE_AGENTS_PAGE_ID, header + body);
 
 	await overwritePageWithMarkdown(NOTION_ROSTERS_PAGE_ID, rostersMd);
-	await overwritePageWithMarkdown(NOTION_FREE_AGENTS_PAGE_ID, freeAgentsMd);
 
 	await logRun({ name: `Sync run ${started}` });
 
