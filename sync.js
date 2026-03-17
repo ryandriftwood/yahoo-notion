@@ -68,7 +68,7 @@ while (freeAgents.length < target) {
 			.join("\\n\\n");
 
 	const header =
-  `Free agents (Top ${faCount} by Yahoo rank)\n` +
+  `Free agents (Top ${freeAgents.length} by Yahoo rank)\n` +
   `Last synced: ${started}\n\n`;
 
 const body = freeAgents.join("\n"); // already "1. Name — Pos — Team" style
