@@ -48,7 +48,7 @@ async function archiveBlocks(blocks) {
 	}
 }
 
-function splitIntoParagraphChunks(text, maxLen = 1800) {
+function splitIntoParagraphChunks(text, maxLen = 8000) {
 	// Notion rich_text has limits; keep it conservative.
 	const lines = text.split("\n");
 	const chunks = [];
