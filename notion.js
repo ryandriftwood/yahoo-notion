@@ -1,9 +1,6 @@
+// notion.js
 import { Client as NotionClient } from "@notionhq/client";
-import {
-	NOTION_TOKEN,
-	NOTION_API_UPDATES_LOG_DATABASE_ID,
-	requireEnv,
-} from "./config.js";
+import { NOTION_TOKEN, NOTION_API_UPDATES_LOG_DATABASE_ID, requireEnv } from "./config.js";
 
 requireEnv("NOTION_TOKEN", NOTION_TOKEN);
 requireEnv("NOTION_API_UPDATES_LOG_DATABASE_ID", NOTION_API_UPDATES_LOG_DATABASE_ID);
@@ -31,9 +28,7 @@ async function listAllChildBlocks(blockId) {
 }
 
 async function archiveBlocks(blocks) {
-	// Archive in small batches to be gentle with rate limits
 	const batchSize = 10;
-
 	for (let i = 0; i < blocks.length; i += batchSize) {
 		const batch = blocks.slice(i, i + batchSize);
 
@@ -48,14 +43,12 @@ async function archiveBlocks(blocks) {
 	}
 }
 
-function splitIntoParagraphChunks(text, maxLen = 8000) {
-	// Notion rich_text has limits; keep it conservative.
+function splitIntoParagraphChunks(text, maxLen = 1900) {
 	const lines = text.split("\n");
 	const chunks = [];
 	let current = "";
 
 	for (const line of lines) {
-		// +1 for newline
 		if ((current + line + "\n").length > maxLen) {
 			if (current.trim().length > 0) chunks.push(current.trimEnd());
 			current = "";
@@ -67,30 +60,60 @@ function splitIntoParagraphChunks(text, maxLen = 8000) {
 }
 
 export async function overwritePageWithMarkdown(pageId, markdown) {
-	// 1) Delete existing content
+	// True overwrite: delete existing children, then write fresh content
 	const blocks = await listAllChildBlocks(pageId);
-	if (blocks.length) {
-		await archiveBlocks(blocks);
-	}
+	if (blocks.length) await archiveBlocks(blocks);
 
-	// 2) Write new content
 	const chunks = splitIntoParagraphChunks(markdown);
 
 	const children = chunks.map((chunk) => ({
 		object: "block",
 		type: "paragraph",
 		paragraph: {
-			rich_text: [
-				{
-					type: "text",
-					text: { content: chunk },
-				},
-			],
+			rich_text: [{ type: "text", text: { content: chunk } }],
 		},
 	}));
 
-	// Append in batches to avoid payload limits
 	const batchSize = 20;
+	for (let i = 0; i < children.length; i += batchSize) {
+		await notion.blocks.children.append({
+			block_id: pageId,
+			children: children.slice(i, i + batchSize),
+		});
+	}
+}
+
+export async function overwritePageWithNumberedList(pageId, headerLines, items) {
+	// headerLines: string[]
+	// items: string[] (NOT pre-numbered)
+	const blocks = await listAllChildBlocks(pageId);
+	if (blocks.length) await archiveBlocks(blocks);
+
+	const children = [];
+
+	for (const line of headerLines) {
+		children.push({
+			object: "block",
+			type: "paragraph",
+			paragraph: {
+				rich_text: [{ type: "text", text: { content: String(line).slice(0, 1900) } }],
+			},
+		});
+	}
+
+	children.push({ object: "block", type: "divider", divider: {} });
+
+	for (const item of items) {
+		children.push({
+			object: "block",
+			type: "numbered_list_item",
+			numbered_list_item: {
+				rich_text: [{ type: "text", text: { content: String(item).slice(0, 1900) } }],
+			},
+		});
+	}
+
+	const batchSize = 50;
 	for (let i = 0; i < children.length; i += batchSize) {
 		await notion.blocks.children.append({
 			block_id: pageId,
