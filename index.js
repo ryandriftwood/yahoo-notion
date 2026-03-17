@@ -27,6 +27,8 @@ const YAHOO_OAUTH2_AUTHORIZE_URL = "https://api.login.yahoo.com/oauth2/request_a
 const YAHOO_OAUTH2_TOKEN_URL = "https://api.login.yahoo.com/oauth2/get_token";
 
 const YAHOO_FANTASY_BASE = "https://fantasysports.yahooapis.com/fantasy/v2";
+const LEAGUE_KEY = "469.l.42443";
+const TEAM_KEY = "469.l.42443.t.10";
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const notion = new NotionClient({ auth: process.env.NOTION_TOKEN });
@@ -327,6 +329,32 @@ app.get("/yahoo/discover", async (req, res) => {
 		console.error(err?.response?.data || err);
 		const details = err?.response?.data ? err.response.data : String(err);
 		res.status(500).send(`Discover failed:\n\n${typeof details === "string" ? details : JSON.stringify(details, null, 2)}`);
+	}
+});
+
+app.get("/yahoo/league/settings", async (req, res) => {
+	try {
+		const xml = await yahooFantasyGet(`league/${LEAGUE_KEY}/settings`);
+		res.type("text/xml").send(xml);
+	} catch (err) {
+		console.error(err?.response?.data || err);
+		const details = err?.response?.data ? err.response.data : String(err);
+		res.status(500).send(
+			`League settings failed:\n\n${typeof details === "string" ? details : JSON.stringify(details, null, 2)}`
+		);
+	}
+});
+
+app.get("/yahoo/team/roster", async (req, res) => {
+	try {
+		const xml = await yahooFantasyGet(`team/${TEAM_KEY}/roster`);
+		res.type("text/xml").send(xml);
+	} catch (err) {
+		console.error(err?.response?.data || err);
+		const details = err?.response?.data ? err.response.data : String(err);
+		res.status(500).send(
+			`Team roster failed:\n\n${typeof details === "string" ? details : JSON.stringify(details, null, 2)}`
+		);
 	}
 });
 
