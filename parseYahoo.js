@@ -43,6 +43,6 @@ export async function parseFreeAgents(xml) {
 		const full = pl?.name?.full || "";
 		const pos = pl?.display_position || "";
 		const mlbTeam = pl?.editorial_team_abbr || "";
-		return `${idx + 1}. ${full}${pos ? ` — ${pos}` : ""}${mlbTeam ? ` — ${mlbTeam}` : ""}`.trim();
+		return `${full}${pos ? ` — ${pos}` : ""}${mlbTeam ? ` — ${mlbTeam}` : ""}`.trim();
 	});
 }
