@@ -34,7 +34,7 @@ export async function runSync() {
 	}
 
 	// 2) Free agents (paginate to top N)
-	const target = YAHOO_FREE_AGENTS_COUNT || 200;
+	const target = YAHOO_FREE_AGENTS_COUNT || 500;
 	const pageSize = 25; // Yahoo commonly caps here
 	let start = 0;
 	let freeAgents = [];
