@@ -44,7 +44,7 @@ export async function runSync() {
 		const count = Math.min(pageSize, remaining);
 
 		const xml = await yahooFantasyGetXml(
-			`league/${YAHOO_LEAGUE_KEY}/players;status=A;sort=rank;start=${start};count=${count}`
+			`league/${YAHOO_LEAGUE_KEY}/players;status=A;sort=OR;start=${start};count=${count}`
 		);
 
 		const page = await parseFreeAgents(xml); // must return NOT-numbered strings
