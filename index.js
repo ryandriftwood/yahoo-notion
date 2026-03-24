@@ -4,6 +4,14 @@ import { YAHOO_OAUTH2_AUTHORIZE_URL, REDIRECT_URI, exchangeCodeForTokens } from 
 import { loadTokens } from "./yahoo.js";
 import { runSync } from "./sync.js";
 
+import { seasonStatsRouteHandler } from "./seasonstats.js";
+import { sevenDayStatsRouteHandler } from "./sevendaystats.js";
+
+// ...
+
+app.post("/sync/seasonstats", seasonStatsRouteHandler());
+app.post("/sync/sevendaystats", sevenDayStatsRouteHandler());
+
 const app = express();
 
 app.get("/", (req, res) => res.type("text/plain").send("ok"));
