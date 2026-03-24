@@ -3,14 +3,8 @@ import { YAHOO_CONSUMER_KEY } from "./config.js";
 import { YAHOO_OAUTH2_AUTHORIZE_URL, REDIRECT_URI, exchangeCodeForTokens } from "./yahoo.js";
 import { loadTokens } from "./yahoo.js";
 import { runSync } from "./sync.js";
-
 import { seasonStatsRouteHandler } from "./seasonstats.js";
 import { sevenDayStatsRouteHandler } from "./sevendaystats.js";
-
-// ...
-
-app.post("/sync/seasonstats", seasonStatsRouteHandler());
-app.post("/sync/sevendaystats", sevenDayStatsRouteHandler());
 
 const app = express();
 
@@ -50,6 +44,9 @@ app.post("/sync", async (req, res) => {
 		res.status(500).json({ ok: false, error: String(e?.response?.data || e?.message || e) });
 	}
 });
+
+app.post("/sync/seasonstats", seasonStatsRouteHandler());
+app.post("/sync/sevendaystats", sevenDayStatsRouteHandler());
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`Server running on port ${port}`));
