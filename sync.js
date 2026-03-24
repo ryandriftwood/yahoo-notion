@@ -47,6 +47,14 @@ export async function runSync() {
 			`league/${YAHOO_LEAGUE_KEY}/players;status=A;sort=OR;start=${start};count=${count}`
 		);
 
+		 console.log({
+    start,
+    count,
+    pageLen: page.length,
+    totalBeforeConcat: freeAgents.length,
+  });
+
+
 		const page = await parseFreeAgents(xml); // must return NOT-numbered strings
 		if (!page.length) break;
 
