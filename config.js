@@ -17,6 +17,9 @@ export const NOTION_API_UPDATES_LOG_DATABASE_ID = process.env.NOTION_API_UPDATES
 export const NOTION_ROSTERS_PAGE_ID = process.env.NOTION_ROSTERS_PAGE_ID;
 export const NOTION_FREE_AGENTS_PAGE_ID = process.env.NOTION_FREE_AGENTS_PAGE_ID;
 
+export const NOTION_SEASON_STATS_PAGE_ID = process.env.NOTION_SEASON_STATS_PAGE_ID;
+export const NOTION_SEVENDAY_STATS_PAGE_ID = process.env.NOTION_SEVENDAY_STATS_PAGE_ID;
+
 export function requireEnv(name, val) {
 	if (!val) throw new Error(`Missing env var ${name}`);
 }
