@@ -4,7 +4,6 @@ import {
 	YAHOO_FREE_AGENTS_COUNT,
 	requireEnv,
 	NOTION_SEASON_STATS_PAGE_ID,
-	SEASON_STATS_SECRET,
 } from "./config.js";
 
 import { yahooFantasyGetXml } from "./yahoo.js";
@@ -164,11 +163,6 @@ export async function runSeasonStatsSync({ statusFilter = "FA", target = 500 } =
 
 export function seasonStatsRouteHandler() {
 	return async (req, res) => {
-		try {
-			if (SEASON_STATS_SECRET) {
-				const got = req.header("x-sync-secret");
-				if (got !== SEASON_STATS_SECRET) return res.status(401).send("Unauthorized");
-			}
 
 			const status = (req.query.status || "FA").toString();
 			const result = await runSeasonStatsSync({ statusFilter: status, target: 500 });
