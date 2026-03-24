@@ -8,7 +8,7 @@ import {
 
 import { yahooFantasyGetXml } from "./yahoo.js";
 import { parseStringPromise } from "xml2js";
-import { overwritePageWithTable } from "./notionTables.js";
+import { overwritePageWithTable } from "./notiontables.js";
 
 requireEnv("YAHOO_LEAGUE_KEY", YAHOO_LEAGUE_KEY);
 requireEnv("NOTION_SEVENDAY_STATS_PAGE_ID", NOTION_SEVENDAY_STATS_PAGE_ID);
