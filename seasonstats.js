@@ -163,6 +163,11 @@ export async function runSeasonStatsSync({ statusFilter = "FA", target = 500 } =
 
 export function seasonStatsRouteHandler() {
 	return async (req, res) => {
+		try {
+			if (SEASON_STATS_SECRET) {
+				const got = req.header("x-sync-secret");
+				if (got !== SEASON_STATS_SECRET) return res.status(401).send("Unauthorized");
+			}
 
 			const status = (req.query.status || "FA").toString();
 			const result = await runSeasonStatsSync({ statusFilter: status, target: 500 });
