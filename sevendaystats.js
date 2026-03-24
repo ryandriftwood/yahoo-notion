@@ -144,6 +144,11 @@ export async function runSevenDayStatsSync({ statusFilter = "FA", target = 500 }
 
 export function sevenDayStatsRouteHandler() {
 	return async (req, res) => {
+		try {
+			if (SEVENDAY_STATS_SECRET) {
+				const got = req.header("x-sync-secret");
+				if (got !== SEVENDAY_STATS_SECRET) return res.status(401).send("Unauthorized");
+			}
 
 			const status = (req.query.status || "FA").toString();
 			const result = await runSevenDayStatsSync({ statusFilter: status, target: 500 });
