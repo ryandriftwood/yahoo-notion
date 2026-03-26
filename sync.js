@@ -23,7 +23,18 @@ function teamKeys() {
 }
 
 export async function runSync() {
-	const started = new Date().toISOString();
+	// Mountain Time (America/Denver), human readable
+	const started = new Date().toLocaleString("en-US", {
+		timeZone: "America/Denver",
+		year: "numeric",
+		month: "2-digit",
+		day: "2-digit",
+		hour: "2-digit",
+		minute: "2-digit",
+		second: "2-digit",
+		hour12: false,
+	});
+
 
 	// 1) Rosters (10 teams)
 	const rosterResults = [];
