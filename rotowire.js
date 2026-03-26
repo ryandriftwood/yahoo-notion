@@ -1,7 +1,4 @@
 // rotowire.js
-// Scrapes MLB daily lineups from Rotowire via Browserless (remote headless browser),
-// diffs against last snapshot, and writes to Notion when changes are found.
-
 import axios from "axios";
 import { Client as NotionClient } from "@notionhq/client";
 import {
@@ -25,8 +22,7 @@ const ROTOWIRE_URL =
   ROTOWIRE_LINEUPS_URL || "https://www.rotowire.com/baseball/daily-lineups.php";
 
 // ---------------------------------------------------------------------------
-// BROWSER HELPER — uses Browserless V2 /content API
-// Docs: https://docs.browserless.io/http-apis/content
+// BROWSER HELPER
 // ---------------------------------------------------------------------------
 
 async function getRenderedHtml() {
@@ -36,17 +32,11 @@ async function getRenderedHtml() {
       url: ROTOWIRE_URL,
       bestAttempt: true,
       gotoOptions: { waitUntil: "networkidle2" },
-      waitForSelector: {
-        selector: ".lineup__list",
-        timeout: 15000,
-      },
+      waitForSelector: { selector: ".lineup__list", timeout: 15000 },
       rejectResourceTypes: ["image", "font", "media"],
     },
     {
-      headers: {
-        "Content-Type": "application/json",
-        "Cache-Control": "no-cache",
-      },
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-cache" },
       timeout: 35000,
       responseType: "text",
     }
@@ -54,10 +44,21 @@ async function getRenderedHtml() {
   return response.data;
 }
 
-// DEBUG export — returns first 5000 chars of rendered HTML
+// DEBUG: first 5000 chars of full page HTML
 export async function getRawHtml() {
+  return (await getRenderedHtml()).slice(0, 5000);
+}
+
+// DEBUG: raw HTML of the first game card (up to 3000 chars)
+export async function getFirstCardHtml() {
   const html = await getRenderedHtml();
-  return html.slice(0, 5000);
+  // Grab from the first lineup card div through to the second one (or 3000 chars)
+  const start = html.indexOf('class="lineup is-mlb');
+  if (start === -1) return "[No lineup card found — class='lineup is-mlb' not present in HTML]";
+  // Walk back to the opening < of that div
+  const divStart = html.lastIndexOf("<", start);
+  const snippet = html.slice(divStart, divStart + 3000);
+  return snippet;
 }
 
 // ---------------------------------------------------------------------------
