@@ -22,7 +22,23 @@ export async function parseTeamRoster(xml) {
 		date: roster?.date || null,
 		players: list.map((pl) => {
 			const full = pl?.name?.full || "";
-			const pos = pl?.selected_position?.position || pl?.eligible.positions?.eligibleposiitons || "";
+				const selectedPos = pl?.selected_position?.position || "";
+	const eligNode = pl?.eligible_positions?.eligible_position || pl?.eligible_positions;
+	const eligList = Array.isArray(eligNode) ? eligNode : eligNode ? [eligNode] : [];
+	const eligPos = eligList
+		.map((e) => e.position || e)  // depending on how xml2js parsed it
+		.filter(Boolean);
+
+	let pos = "";
+	if (selectedPos && eligPos.length) {
+		// Put selected first, then full elig list
+		pos = `${selectedPos} (${eligPos.join(", ")})`;
+	} else if (selectedPos) {
+		pos = selectedPos;
+	} else if (eligPos.length) {
+		pos = eligPos.join(", ");
+	}
+
 			const mlbTeam = pl?.editorial_team_abbr || "";
 			return `${full}${pos ? ` — ${pos}` : ""}${mlbTeam ? ` — ${mlbTeam}` : ""}`.trim();
 		}),
