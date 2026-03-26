@@ -20,6 +20,16 @@ export const NOTION_FREE_AGENTS_PAGE_ID = process.env.NOTION_FREE_AGENTS_PAGE_ID
 export const NOTION_SEASON_STATS_PAGE_ID = process.env.NOTION_SEASON_STATS_PAGE_ID;
 export const NOTION_SEVENDAY_STATS_PAGE_ID = process.env.NOTION_SEVENDAY_STATS_PAGE_ID;
 
+// ── Rotowire MLB Lineups ──────────────────────────────────────────────────────
+// Override the default Rotowire URL (optional)
+export const ROTOWIRE_LINEUPS_URL = process.env.ROTOWIRE_LINEUPS_URL;
+// Notion page that always holds the CURRENT (newest) lineup
+export const NOTION_LINEUP_NEW_PAGE_ID = process.env.NOTION_LINEUP_NEW_PAGE_ID;
+// Notion page that holds the PREVIOUS lineup (overwritten on each change)
+export const NOTION_LINEUP_OLD_PAGE_ID = process.env.NOTION_LINEUP_OLD_PAGE_ID;
+// Notion database that logs every lineup-sync run
+export const NOTION_LINEUP_DB_ID = process.env.NOTION_LINEUP_DB_ID;
+
 export function requireEnv(name, val) {
 	if (!val) throw new Error(`Missing env var ${name}`);
 }
