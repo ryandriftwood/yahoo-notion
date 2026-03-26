@@ -46,6 +46,17 @@ export async function parseFreeAgents(xml) {
 		const eligPos = eligList.map((e) => e.position).filter(Boolean);
 		const pos = eligPos.length ? eligPos.join(", ") : (pl?.display_position || "");
 		const mlbTeam = pl?.editorial_team_abbr || "";
-		return `${full}${pos ? ` — ${pos}` : ""}${mlbTeam ? ` — ${mlbTeam}` : ""}`.trim();
+		const ownershipType =
+			pl?.ownership?.ownership_type ||
+			pl?.ownership_type ||            // depending on how xml2js shaped it
+			"";
+
+		const isWaivers =
+			typeof ownershipType === "string" &&
+			ownershipType.toLowerCase().includes("waiver");
+
+		const waiverTag = isWaivers ? " — W" : ""; // or " — waiver" if you prefer
+
+		return `${full}${pos ? ` — ${pos}` : ""}${mlbTeam ? ` — ${mlbTeam}` : ""}${waiverTag}`.trim();
 	});
 }
