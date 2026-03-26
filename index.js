@@ -5,7 +5,7 @@ import { loadTokens } from "./yahoo.js";
 import { runSync } from "./sync.js";
 import { seasonStatsRouteHandler } from "./seasonstats.js";
 import { sevenDayStatsRouteHandler } from "./sevendaystats.js";
-import { runLineupSync, scrapeRotowireLineups, getRawHtml } from "./rotowire.js";
+import { runLineupSync, scrapeRotowireLineups, getRawHtml, getFirstCardHtml } from "./rotowire.js";
 
 const app = express();
 
@@ -59,7 +59,6 @@ app.post("/sync/lineups", async (req, res) => {
 	}
 });
 
-// Returns the parsed snapshot as JSON so you can see what the scraper found
 app.get("/debug/lineups", async (req, res) => {
 	try {
 		const snapshot = await scrapeRotowireLineups();
@@ -69,11 +68,20 @@ app.get("/debug/lineups", async (req, res) => {
 	}
 });
 
-// Returns the first 5000 chars of the raw text Rotowire sends back
 app.get("/debug/lineups/raw", async (req, res) => {
 	try {
 		const raw = await getRawHtml();
-		res.type("text/plain").send(raw.slice(0, 5000));
+		res.type("text/plain").send(raw);
+	} catch (e) {
+		res.status(500).send(String(e?.message || e));
+	}
+});
+
+// Dumps the raw HTML of the first game card so we can inspect player markup
+app.get("/debug/lineups/card", async (req, res) => {
+	try {
+		const card = await getFirstCardHtml();
+		res.type("text/plain").send(card);
 	} catch (e) {
 		res.status(500).send(String(e?.message || e));
 	}
