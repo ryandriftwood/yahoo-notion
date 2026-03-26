@@ -57,6 +57,16 @@ export async function getFirstCardHtml() {
 }
 
 // ---------------------------------------------------------------------------
+// HELPERS
+// ---------------------------------------------------------------------------
+
+// Extract a named attribute value from a tag's opening HTML string
+function getAttr(tagHtml, attrName) {
+  const re = new RegExp(`${attrName}="([^"]*)"`, "i");
+  return tagHtml.match(re)?.[1] ?? null;
+}
+
+// ---------------------------------------------------------------------------
 // 1.  SCRAPE
 // ---------------------------------------------------------------------------
 
@@ -64,7 +74,6 @@ export async function scrapeRotowireLineups() {
   const html = await getRenderedHtml();
   const games = [];
 
-  // Each game card
   const gameCardRe = /<div[^>]+class="[^"]*lineup is-mlb[^"]*"[^>]*>([\s\S]*?)(?=<div[^>]+class="[^"]*lineup is-mlb|<\/section|$)/g;
   let cardMatch;
 
@@ -87,16 +96,22 @@ export async function scrapeRotowireLineups() {
     const lists = [...card.matchAll(listRe)];
 
     const parseList = (listHtml, classAttr) => {
-      // Status comes from the ul class: is-confirmed or default projected
       const status = classAttr.includes("is-confirmed") ? "confirmed" : "projected";
 
-      // Each player is <li class="lineup__player">...<a title="Full Name" href="...">...</a>...
-      // Grab the title attribute for full name, fall back to link text
-      const playerRe = /<li[^>]+class="[^"]*lineup__player[^"]*"[^>]*>[\s\S]*?<a[^>]+(?:title="([^"]+)"[^>]*|[^>]*)>([^<]+)<\/a>/g;
+      // Match each <li class="lineup__player">...</li> block
+      const liRe = /<li[^>]+class="[^"]*lineup__player[^"]*"[^>]*>([\s\S]*?)<\/li>/g;
       const players = [];
-      let pm;
-      while ((pm = playerRe.exec(listHtml)) !== null) {
-        const name = (pm[1] || pm[2] || "").trim();
+      let li;
+      while ((li = liRe.exec(listHtml)) !== null) {
+        const liContent = li[1];
+        // Find the <a> tag inside this li
+        const aMatch = liContent.match(/<a([^>]+)>([^<]+)<\/a>/);
+        if (!aMatch) continue;
+        const aAttrs = aMatch[1];   // everything inside the opening <a ...>
+        const aText  = aMatch[2].trim();
+        // Prefer title attribute (full name), fall back to link text
+        const title = getAttr(aAttrs, "title");
+        const name = (title || aText).trim();
         if (name) players.push(name);
       }
       return { status, players };
