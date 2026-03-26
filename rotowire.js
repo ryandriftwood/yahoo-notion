@@ -1,8 +1,8 @@
 // rotowire.js
-// Scrapes MLB daily lineups from Rotowire using Puppeteer (JS-rendered page),
+// Scrapes MLB daily lineups from Rotowire via Browserless (remote headless browser),
 // diffs against last snapshot, and writes to Notion when changes are found.
 
-import puppeteer from "puppeteer";
+import axios from "axios";
 import { Client as NotionClient } from "@notionhq/client";
 import {
   NOTION_TOKEN,
@@ -10,6 +10,7 @@ import {
   NOTION_LINEUP_NEW_PAGE_ID,
   NOTION_LINEUP_OLD_PAGE_ID,
   NOTION_LINEUP_DB_ID,
+  BROWSERLESS_TOKEN,
   requireEnv,
 } from "./config.js";
 
@@ -17,52 +18,37 @@ requireEnv("NOTION_TOKEN", NOTION_TOKEN);
 requireEnv("NOTION_LINEUP_NEW_PAGE_ID", NOTION_LINEUP_NEW_PAGE_ID);
 requireEnv("NOTION_LINEUP_OLD_PAGE_ID", NOTION_LINEUP_OLD_PAGE_ID);
 requireEnv("NOTION_LINEUP_DB_ID", NOTION_LINEUP_DB_ID);
+requireEnv("BROWSERLESS_TOKEN", BROWSERLESS_TOKEN);
 
 const notion = new NotionClient({ auth: NOTION_TOKEN });
 const ROTOWIRE_URL =
   ROTOWIRE_LINEUPS_URL || "https://www.rotowire.com/baseball/daily-lineups.php";
 
 // ---------------------------------------------------------------------------
-// BROWSER HELPER
+// BROWSER HELPER — uses Browserless /content API
+// Browserless renders the page in a real Chrome instance on their servers
+// and returns the fully-rendered HTML. No local Chrome needed.
 // ---------------------------------------------------------------------------
 
 async function getRenderedHtml() {
-  // executablePath() tells Puppeteer where it installed Chrome.
-  // On Render, PUPPETEER_CACHE_DIR may differ; we also accept a manual override
-  // via CHROME_PATH env var if needed.
-  const executablePath =
-    process.env.CHROME_PATH || puppeteer.executablePath();
-
-  const browser = await puppeteer.launch({
-    headless: true,
-    executablePath,
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-gpu",
-      "--single-process",
-    ],
-  });
-  try {
-    const page = await browser.newPage();
-    await page.setUserAgent(
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
-    );
-    await page.setRequestInterception(true);
-    page.on("request", (req) => {
-      if (["image", "font", "media"].includes(req.resourceType())) req.abort();
-      else req.continue();
-    });
-    await page.goto(ROTOWIRE_URL, { waitUntil: "networkidle2", timeout: 30000 });
-    await page.waitForSelector(".lineup__list", { timeout: 15000 }).catch(() => {});
-    return await page.content();
-  } finally {
-    await browser.close();
-  }
+  const response = await axios.post(
+    `https://chrome.browserless.io/content?token=${BROWSERLESS_TOKEN}`,
+    {
+      url: ROTOWIRE_URL,
+      waitFor: ".lineup__list",  // wait until lineup cards are in the DOM
+      rejectResourceTypes: ["image", "font", "media"],
+    },
+    {
+      headers: { "Content-Type": "application/json" },
+      timeout: 30000,
+      // response is raw HTML text
+      responseType: "text",
+    }
+  );
+  return response.data;
 }
 
-// DEBUG export
+// DEBUG export — returns first 5000 chars of rendered HTML
 export async function getRawHtml() {
   const html = await getRenderedHtml();
   return html.slice(0, 5000);
