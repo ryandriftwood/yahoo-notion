@@ -5,6 +5,7 @@ import { loadTokens } from "./yahoo.js";
 import { runSync } from "./sync.js";
 import { seasonStatsRouteHandler } from "./seasonstats.js";
 import { sevenDayStatsRouteHandler } from "./sevendaystats.js";
+import { runLineupSync } from "./rotowire.js";
 
 const app = express();
 
@@ -47,6 +48,16 @@ app.post("/sync", async (req, res) => {
 
 app.post("/sync/seasonstats", seasonStatsRouteHandler());
 app.post("/sync/sevendaystats", sevenDayStatsRouteHandler());
+
+// ── Rotowire MLB Lineups ────────────────────────────────────────────────────
+app.post("/sync/lineups", async (req, res) => {
+	try {
+		const result = await runLineupSync();
+		res.json({ ok: true, result });
+	} catch (e) {
+		res.status(500).json({ ok: false, error: String(e?.response?.data || e?.message || e) });
+	}
+});
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`Server running on port ${port}`));
