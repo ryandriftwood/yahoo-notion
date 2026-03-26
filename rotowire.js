@@ -1,8 +1,8 @@
 // rotowire.js
-// Scrapes MLB daily lineups from Rotowire, diffs against last snapshot,
-// and writes new/old lineup pages + DB log to Notion when changes are found.
+// Scrapes MLB daily lineups from Rotowire using Puppeteer (JS-rendered page),
+// diffs against last snapshot, and writes to Notion when changes are found.
 
-import axios from "axios";
+import puppeteer from "puppeteer";
 import { Client as NotionClient } from "@notionhq/client";
 import {
   NOTION_TOKEN,
@@ -22,18 +22,45 @@ const notion = new NotionClient({ auth: NOTION_TOKEN });
 const ROTOWIRE_URL =
   ROTOWIRE_LINEUPS_URL || "https://www.rotowire.com/baseball/daily-lineups.php";
 
-// Positions used to identify player lines in the text
-const POSITIONS = new Set(["C","1B","2B","3B","SS","LF","CF","RF","DH","P","SP"]);
+// ---------------------------------------------------------------------------
+// BROWSER HELPER
+// ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// DEBUG: returns raw text from Rotowire (first 5000 chars exposed via route)
-// ---------------------------------------------------------------------------
-export async function getRawHtml() {
-  const { data } = await axios.get(ROTOWIRE_URL, {
-    headers: { "User-Agent": "Mozilla/5.0 (compatible; yahoo-notion-bot/1.0)" },
-    timeout: 15000,
+async function getRenderedHtml() {
+  const browser = await puppeteer.launch({
+    headless: true,
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+    ],
   });
-  return typeof data === "string" ? data : JSON.stringify(data);
+  try {
+    const page = await browser.newPage();
+    await page.setUserAgent(
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
+    );
+    // Block images/fonts to speed up load
+    await page.setRequestInterception(true);
+    page.on("request", (req) => {
+      if (["image", "font", "media"].includes(req.resourceType())) req.abort();
+      else req.continue();
+    });
+    await page.goto(ROTOWIRE_URL, { waitUntil: "networkidle2", timeout: 30000 });
+    // Wait for at least one lineup card to appear
+    await page.waitForSelector(".lineup__list", { timeout: 15000 }).catch(() => {});
+    const html = await page.content();
+    return html;
+  } finally {
+    await browser.close();
+  }
+}
+
+// DEBUG export — returns first 5000 chars of rendered HTML
+export async function getRawHtml() {
+  const html = await getRenderedHtml();
+  return html.slice(0, 5000);
 }
 
 // ---------------------------------------------------------------------------
@@ -41,62 +68,45 @@ export async function getRawHtml() {
 // ---------------------------------------------------------------------------
 
 export async function scrapeRotowireLineups() {
-  const raw = await getRawHtml();
-  const lines = raw.split("\n").map((l) => l.trim()).filter(Boolean);
-
+  const html = await getRenderedHtml();
   const games = [];
 
-  const timeRe = /^\d{1,2}:\d{2}\s+[AP]M\s+ET$/;
-  const statusRe = /^(Confirmed|Expected|Projected)\s+Lineup$/i;
-  const posPlayerRe = /^([A-Z0-9]{1,3})\s{2,}(.+?)\s+[LRBS]$/;
+  // Each game card: <div class="lineup is-mlb ...">
+  const gameCardRe = /<div[^>]+class="[^"]*lineup is-mlb[^"]*"[^>]*>([\s\S]*?)(?=<div[^>]+class="[^"]*lineup is-mlb|<\/section|$)/g;
+  let cardMatch;
 
-  let i = 0;
-  while (i < lines.length) {
-    const line = lines[i];
+  while ((cardMatch = gameCardRe.exec(html)) !== null) {
+    const card = cardMatch[1];
 
-    if (!timeRe.test(line)) { i++; continue; }
+    // Team abbreviations
+    const abbrRe = /<div[^>]+class="[^"]*lineup__abbr[^"]*"[^>]*>([^<]+)<\/div>/g;
+    const abbrs = [...card.matchAll(abbrRe)];
+    const awayTeam = abbrs[0]?.[1]?.trim() ?? "AWAY";
+    const homeTeam = abbrs[1]?.[1]?.trim() ?? "HOME";
+    if (awayTeam === "AWAY" && homeTeam === "HOME") continue;
 
-    const gameTime = line;
-    i++;
+    // Game time
+    const timeMatch = card.match(/<div[^>]+class="[^"]*lineup__time[^"]*"[^>]*>([^<]+)<\/div>/);
+    const gameTime = timeMatch?.[1]?.trim() ?? "";
 
-    while (i < lines.length && !lines[i].match(/^[A-Z]{2,3}$/) && !timeRe.test(lines[i])) i++;
-    const awayTeam = lines[i] ?? "AWAY";
-    i++;
+    // Lineup lists — class contains is-confirmed or is-projected
+    const listRe = /<ul[^>]+class="([^"]*lineup__list[^"]*?)"[^>]*>([\s\S]*?)<\/ul>/g;
+    const lists = [...card.matchAll(listRe)];
 
-    while (i < lines.length && !lines[i].match(/^[A-Z]{2,3}$/) && !statusRe.test(lines[i]) && !timeRe.test(lines[i])) i++;
-    const homeTeam = lines[i] ?? "HOME";
-    i++;
-
-    const parseNextLineup = () => {
-      while (i < lines.length && !statusRe.test(lines[i]) && !timeRe.test(lines[i])) i++;
-      if (i >= lines.length || timeRe.test(lines[i])) return null;
-
-      const statusMatch = lines[i].match(statusRe);
-      const status = statusMatch?.[1]?.toLowerCase() === "confirmed" ? "confirmed" : "projected";
-      i++;
-
-      const players = [];
-      while (i < lines.length) {
-        const l = lines[i];
-        if (timeRe.test(l) || statusRe.test(l)) break;
-        if (
-          l.startsWith("$") ||
-          l.startsWith("-") ||
-          l.match(/^\d+-\d+/) ||
-          l.match(/^\*\*/) ||
-          l.match(/^(LINE|O\/U|Umpire|Watch|Alerts|Dome|Precipitation|Wind|Temperature)/i)
-        ) { i++; continue; }
-        const m = l.match(posPlayerRe);
-        if (m && POSITIONS.has(m[1])) {
-          players.push(`${m[1]} ${m[2].trim()}`);
-        }
-        i++;
-      }
+    const parseList = (listHtml, classAttr) => {
+      const status = classAttr.includes("is-confirmed") ? "confirmed" : "projected";
+      // Player links: <a class="lineup__player ...">Name</a>
+      const playerRe = /<a[^>]+class="[^"]*lineup__player[^"]*"[^>]*>([^<]+)<\/a>/g;
+      const players = [...listHtml.matchAll(playerRe)].map((m) => m[1].trim()).filter(Boolean);
       return { status, players };
     };
 
-    const awayLineup = parseNextLineup() ?? { status: "projected", players: [] };
-    const homeLineup = parseNextLineup() ?? { status: "projected", players: [] };
+    const awayLineup = lists[0]
+      ? parseList(lists[0][2], lists[0][1])
+      : { status: "projected", players: [] };
+    const homeLineup = lists[1]
+      ? parseList(lists[1][2], lists[1][1])
+      : { status: "projected", players: [] };
 
     const gameId = `${awayTeam}-${homeTeam}`;
     games.push({ gameId, awayTeam, homeTeam, gameTime, awayLineup, homeLineup });
@@ -128,7 +138,6 @@ export function hasLineupChanged(oldSnapshot, newSnapshot) {
       if (JSON.stringify(o[side].players) !== JSON.stringify(n[side].players)) return true;
     }
   }
-
   return false;
 }
 
@@ -143,7 +152,6 @@ function formatSnapshot(snapshot) {
     hour: "2-digit", minute: "2-digit", second: "2-digit",
     hour12: false,
   });
-
   const lines = [`MLB Lineups -- scraped ${ts} MT`, ""];
   for (const game of snapshot.games) {
     lines.push(`${game.awayTeam} @ ${game.homeTeam}  |  ${game.gameTime}`);
@@ -252,7 +260,6 @@ export async function runLineupSync() {
   if (oldSnapshot) {
     await overwritePageWithMarkdown(NOTION_LINEUP_OLD_PAGE_ID, formatSnapshot(oldSnapshot));
   }
-
   await overwritePageWithMarkdown(NOTION_LINEUP_NEW_PAGE_ID, formatSnapshot(newSnapshot));
   await saveSnapshot(newSnapshot);
 
