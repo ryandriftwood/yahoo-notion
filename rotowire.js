@@ -27,13 +27,21 @@ const ROTOWIRE_URL =
 // ---------------------------------------------------------------------------
 
 async function getRenderedHtml() {
+  // executablePath() tells Puppeteer where it installed Chrome.
+  // On Render, PUPPETEER_CACHE_DIR may differ; we also accept a manual override
+  // via CHROME_PATH env var if needed.
+  const executablePath =
+    process.env.CHROME_PATH || puppeteer.executablePath();
+
   const browser = await puppeteer.launch({
     headless: true,
+    executablePath,
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
       "--disable-dev-shm-usage",
       "--disable-gpu",
+      "--single-process",
     ],
   });
   try {
@@ -41,23 +49,20 @@ async function getRenderedHtml() {
     await page.setUserAgent(
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
     );
-    // Block images/fonts to speed up load
     await page.setRequestInterception(true);
     page.on("request", (req) => {
       if (["image", "font", "media"].includes(req.resourceType())) req.abort();
       else req.continue();
     });
     await page.goto(ROTOWIRE_URL, { waitUntil: "networkidle2", timeout: 30000 });
-    // Wait for at least one lineup card to appear
     await page.waitForSelector(".lineup__list", { timeout: 15000 }).catch(() => {});
-    const html = await page.content();
-    return html;
+    return await page.content();
   } finally {
     await browser.close();
   }
 }
 
-// DEBUG export — returns first 5000 chars of rendered HTML
+// DEBUG export
 export async function getRawHtml() {
   const html = await getRenderedHtml();
   return html.slice(0, 5000);
@@ -71,45 +76,35 @@ export async function scrapeRotowireLineups() {
   const html = await getRenderedHtml();
   const games = [];
 
-  // Each game card: <div class="lineup is-mlb ...">
   const gameCardRe = /<div[^>]+class="[^"]*lineup is-mlb[^"]*"[^>]*>([\s\S]*?)(?=<div[^>]+class="[^"]*lineup is-mlb|<\/section|$)/g;
   let cardMatch;
 
   while ((cardMatch = gameCardRe.exec(html)) !== null) {
     const card = cardMatch[1];
 
-    // Team abbreviations
     const abbrRe = /<div[^>]+class="[^"]*lineup__abbr[^"]*"[^>]*>([^<]+)<\/div>/g;
     const abbrs = [...card.matchAll(abbrRe)];
     const awayTeam = abbrs[0]?.[1]?.trim() ?? "AWAY";
     const homeTeam = abbrs[1]?.[1]?.trim() ?? "HOME";
     if (awayTeam === "AWAY" && homeTeam === "HOME") continue;
 
-    // Game time
     const timeMatch = card.match(/<div[^>]+class="[^"]*lineup__time[^"]*"[^>]*>([^<]+)<\/div>/);
     const gameTime = timeMatch?.[1]?.trim() ?? "";
 
-    // Lineup lists — class contains is-confirmed or is-projected
     const listRe = /<ul[^>]+class="([^"]*lineup__list[^"]*?)"[^>]*>([\s\S]*?)<\/ul>/g;
     const lists = [...card.matchAll(listRe)];
 
     const parseList = (listHtml, classAttr) => {
       const status = classAttr.includes("is-confirmed") ? "confirmed" : "projected";
-      // Player links: <a class="lineup__player ...">Name</a>
       const playerRe = /<a[^>]+class="[^"]*lineup__player[^"]*"[^>]*>([^<]+)<\/a>/g;
       const players = [...listHtml.matchAll(playerRe)].map((m) => m[1].trim()).filter(Boolean);
       return { status, players };
     };
 
-    const awayLineup = lists[0]
-      ? parseList(lists[0][2], lists[0][1])
-      : { status: "projected", players: [] };
-    const homeLineup = lists[1]
-      ? parseList(lists[1][2], lists[1][1])
-      : { status: "projected", players: [] };
+    const awayLineup = lists[0] ? parseList(lists[0][2], lists[0][1]) : { status: "projected", players: [] };
+    const homeLineup = lists[1] ? parseList(lists[1][2], lists[1][1]) : { status: "projected", players: [] };
 
-    const gameId = `${awayTeam}-${homeTeam}`;
-    games.push({ gameId, awayTeam, homeTeam, gameTime, awayLineup, homeLineup });
+    games.push({ gameId: `${awayTeam}-${homeTeam}`, awayTeam, homeTeam, gameTime, awayLineup, homeLineup });
   }
 
   return { scrapedAt: new Date().toISOString(), games };
@@ -121,17 +116,13 @@ export async function scrapeRotowireLineups() {
 
 export function hasLineupChanged(oldSnapshot, newSnapshot) {
   if (!oldSnapshot) return true;
-
   const oldMap = Object.fromEntries((oldSnapshot.games || []).map((g) => [g.gameId, g]));
   const newMap = Object.fromEntries((newSnapshot.games || []).map((g) => [g.gameId, g]));
-
   const oldIds = Object.keys(oldMap).sort();
   const newIds = Object.keys(newMap).sort();
   if (JSON.stringify(oldIds) !== JSON.stringify(newIds)) return true;
-
   for (const id of newIds) {
-    const o = oldMap[id];
-    const n = newMap[id];
+    const o = oldMap[id]; const n = newMap[id];
     if (!o || !n) return true;
     for (const side of ["awayLineup", "homeLineup"]) {
       if (o[side].status !== n[side].status) return true;
@@ -167,7 +158,7 @@ function formatSnapshot(snapshot) {
 // ---------------------------------------------------------------------------
 
 async function listAllChildBlocks(blockId) {
-  let cursor = undefined;
+  let cursor;
   const all = [];
   while (true) {
     const resp = await notion.blocks.children.list({ block_id: blockId, start_cursor: cursor, page_size: 100 });
@@ -181,8 +172,7 @@ async function listAllChildBlocks(blockId) {
 async function archiveBlocks(blocks) {
   const batchSize = 10;
   for (let i = 0; i < blocks.length; i += batchSize) {
-    const batch = blocks.slice(i, i + batchSize);
-    await Promise.all(batch.map((b) => notion.blocks.update({ block_id: b.id, in_trash: true })));
+    await Promise.all(blocks.slice(i, i + batchSize).map((b) => notion.blocks.update({ block_id: b.id, in_trash: true })));
   }
 }
 
@@ -192,12 +182,12 @@ function splitIntoParagraphChunks(text, maxLen = 1900) {
   let current = "";
   for (const line of lines) {
     if ((current + line + "\n").length > maxLen) {
-      if (current.trim().length > 0) chunks.push(current.trimEnd());
+      if (current.trim()) chunks.push(current.trimEnd());
       current = "";
     }
     current += line + "\n";
   }
-  if (current.trim().length > 0) chunks.push(current.trimEnd());
+  if (current.trim()) chunks.push(current.trimEnd());
   return chunks;
 }
 
@@ -205,10 +195,7 @@ async function overwritePageWithMarkdown(pageId, markdown) {
   const blocks = await listAllChildBlocks(pageId);
   if (blocks.length) await archiveBlocks(blocks);
   const chunks = splitIntoParagraphChunks(markdown);
-  const children = chunks.map((chunk) => ({
-    object: "block", type: "paragraph",
-    paragraph: { rich_text: [{ type: "text", text: { content: chunk } }] },
-  }));
+  const children = chunks.map((chunk) => ({ object: "block", type: "paragraph", paragraph: { rich_text: [{ type: "text", text: { content: chunk } }] } }));
   const batchSize = 20;
   for (let i = 0; i < children.length; i += batchSize) {
     await notion.blocks.children.append({ block_id: pageId, children: children.slice(i, i + batchSize) });
@@ -216,12 +203,7 @@ async function overwritePageWithMarkdown(pageId, markdown) {
 }
 
 async function logLineupRun({ label, gamesCount, changesDetected }) {
-  const ts = new Date().toLocaleString("en-US", {
-    timeZone: "America/Denver",
-    year: "numeric", month: "2-digit", day: "2-digit",
-    hour: "2-digit", minute: "2-digit", second: "2-digit",
-    hour12: false,
-  });
+  const ts = new Date().toLocaleString("en-US", { timeZone: "America/Denver", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
   await notion.pages.create({
     parent: { database_id: NOTION_LINEUP_DB_ID },
     properties: {
@@ -256,18 +238,11 @@ export async function runLineupSync() {
   }
 
   console.log(`[lineup] Changes detected (${newSnapshot.games.length} games). Updating Notion...`);
-
-  if (oldSnapshot) {
-    await overwritePageWithMarkdown(NOTION_LINEUP_OLD_PAGE_ID, formatSnapshot(oldSnapshot));
-  }
+  if (oldSnapshot) await overwritePageWithMarkdown(NOTION_LINEUP_OLD_PAGE_ID, formatSnapshot(oldSnapshot));
   await overwritePageWithMarkdown(NOTION_LINEUP_NEW_PAGE_ID, formatSnapshot(newSnapshot));
   await saveSnapshot(newSnapshot);
 
-  const ts = new Date(newSnapshot.scrapedAt).toLocaleString("en-US", {
-    timeZone: "America/Denver", month: "2-digit", day: "2-digit",
-    hour: "2-digit", minute: "2-digit", hour12: false,
-  });
+  const ts = new Date(newSnapshot.scrapedAt).toLocaleString("en-US", { timeZone: "America/Denver", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
   await logLineupRun({ label: `Lineup update ${ts}`, gamesCount: newSnapshot.games.length, changesDetected: true });
-
   return { changed: true, games: newSnapshot.games.length };
 }

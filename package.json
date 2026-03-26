@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "start": "node index.js",
-    "sync:lineups": "node rotowire-cli.js"
+    "sync:lineups": "node rotowire-cli.js",
+    "postinstall": "node -e \"import('puppeteer').then(m => m.default.executablePath()).catch(() => require('child_process').execSync('npx puppeteer browsers install chrome', {stdio: 'inherit'}))\""
   },
   "dependencies": {
     "@notionhq/client": "^2.2.15",
