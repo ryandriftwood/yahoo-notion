@@ -60,10 +60,51 @@ export async function getFirstCardHtml() {
 // HELPERS
 // ---------------------------------------------------------------------------
 
-// Extract a named attribute value from a tag's opening HTML string
 function getAttr(tagHtml, attrName) {
   const re = new RegExp(`${attrName}="([^"]*)"`, "i");
   return tagHtml.match(re)?.[1] ?? null;
+}
+
+// Parse a single <li class="lineup__player"> block into a structured object.
+// Returns { order, position, name, bats } or null if unparseable.
+function parsePlayerLi(liContent, order) {
+  // Position: <div class="lineup__pos">SS</div>
+  const posMatch = liContent.match(/<div[^>]+class="[^"]*lineup__pos[^"]*"[^>]*>([^<]+)<\/div>/);
+  const position = posMatch?.[1]?.trim() ?? "";
+
+  // Name: <a title="Full Name" href="...">Abbrev</a>
+  const aMatch = liContent.match(/<a([^>]+)>([^<]+)<\/a>/);
+  if (!aMatch) return null;
+  const title = getAttr(aMatch[1], "title");
+  const name = (title || aMatch[2]).trim();
+  if (!name) return null;
+
+  // Bats handedness: <span class="lineup__bats">S</span>
+  const batsMatch = liContent.match(/<span[^>]+class="[^"]*lineup__bats[^"]*"[^>]*>([^<]+)<\/span>/);
+  const bats = batsMatch?.[1]?.trim() ?? "";
+
+  return { order, position, name, bats };
+}
+
+// Parse the starting pitcher block.
+// Rotowire wraps the SP in <div class="lineup__pitcher"> (outside the batting order ul).
+// Returns { name, throws } or null.
+function parseSp(cardHtml) {
+  // Find the pitcher container
+  const pitcherBlockMatch = cardHtml.match(/<div[^>]+class="[^"]*lineup__pitcher[^"]*"[^>]*>([\s\S]*?)<\/div>\s*<\/div>/);
+  if (!pitcherBlockMatch) return null;
+  const block = pitcherBlockMatch[1];
+
+  const aMatch = block.match(/<a([^>]+)>([^<]+)<\/a>/);
+  if (!aMatch) return null;
+  const title = getAttr(aMatch[1], "title");
+  const name = (title || aMatch[2]).trim();
+
+  // Throws handedness: <span class="lineup__throws">R</span>
+  const throwsMatch = block.match(/<span[^>]+class="[^"]*lineup__throws[^"]*"[^>]*>([^<]+)<\/span>/);
+  const throws = throwsMatch?.[1]?.trim() ?? "";
+
+  return name ? { name, throws } : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -98,27 +139,35 @@ export async function scrapeRotowireLineups() {
     const parseList = (listHtml, classAttr) => {
       const status = classAttr.includes("is-confirmed") ? "confirmed" : "projected";
 
-      // Match each <li class="lineup__player">...</li> block
       const liRe = /<li[^>]+class="[^"]*lineup__player[^"]*"[^>]*>([\s\S]*?)<\/li>/g;
       const players = [];
       let li;
+      let order = 1;
       while ((li = liRe.exec(listHtml)) !== null) {
-        const liContent = li[1];
-        // Find the <a> tag inside this li
-        const aMatch = liContent.match(/<a([^>]+)>([^<]+)<\/a>/);
-        if (!aMatch) continue;
-        const aAttrs = aMatch[1];   // everything inside the opening <a ...>
-        const aText  = aMatch[2].trim();
-        // Prefer title attribute (full name), fall back to link text
-        const title = getAttr(aAttrs, "title");
-        const name = (title || aText).trim();
-        if (name) players.push(name);
+        const player = parsePlayerLi(li[1], order);
+        if (player) { players.push(player); order++; }
       }
       return { status, players };
     };
 
-    const awayLineup = lists[0] ? parseList(lists[0][2], lists[0][1]) : { status: "projected", players: [] };
-    const homeLineup = lists[1] ? parseList(lists[1][2], lists[1][1]) : { status: "projected", players: [] };
+    // Away lineup is lists[0], home is lists[1]
+    // But first check for separate SP divs — Rotowire may embed them before each list
+    // Split the card into away half / home half using lineup__main structure
+    const mainMatch = card.match(/<div[^>]+class="[^"]*lineup__main[^"]*"[^>]*>([\s\S]*)/);
+    const mainHtml = mainMatch?.[1] ?? card;
+
+    // SP blocks: two lineup__pitcher divs, one per team
+    const spRe = /<div[^>]+class="[^"]*lineup__pitcher[^"]*"[^>]*>([\s\S]*?)<\/div>/g;
+    const spMatches = [...mainHtml.matchAll(spRe)];
+    const awaySp = spMatches[0] ? parseSp(`<div class="lineup__pitcher">${spMatches[0][1]}</div></div>`) : null;
+    const homeSp = spMatches[1] ? parseSp(`<div class="lineup__pitcher">${spMatches[1][1]}</div></div>`) : null;
+
+    const awayLineup = lists[0]
+      ? { ...parseList(lists[0][2], lists[0][1]), sp: awaySp }
+      : { status: "projected", sp: null, players: [] };
+    const homeLineup = lists[1]
+      ? { ...parseList(lists[1][2], lists[1][1]), sp: homeSp }
+      : { status: "projected", sp: null, players: [] };
 
     games.push({ gameId: `${awayTeam}-${homeTeam}`, awayTeam, homeTeam, gameTime, awayLineup, homeLineup });
   }
@@ -142,7 +191,12 @@ export function hasLineupChanged(oldSnapshot, newSnapshot) {
     if (!o || !n) return true;
     for (const side of ["awayLineup", "homeLineup"]) {
       if (o[side].status !== n[side].status) return true;
-      if (JSON.stringify(o[side].players) !== JSON.stringify(n[side].players)) return true;
+      // Compare SP
+      if ((o[side].sp?.name ?? "") !== (n[side].sp?.name ?? "")) return true;
+      // Compare batting order: names + positions in order
+      const oPlayers = (o[side].players || []).map((p) => `${p.order}|${p.position}|${p.name}`);
+      const nPlayers = (n[side].players || []).map((p) => `${p.order}|${p.position}|${p.name}`);
+      if (JSON.stringify(oPlayers) !== JSON.stringify(nPlayers)) return true;
     }
   }
   return false;
@@ -152,6 +206,15 @@ export function hasLineupChanged(oldSnapshot, newSnapshot) {
 // 3.  FORMAT
 // ---------------------------------------------------------------------------
 
+function formatLineupSide(lineup) {
+  const statusLabel = lineup.status.toUpperCase();
+  const spLine = lineup.sp ? `  SP: ${lineup.sp.name}${lineup.sp.throws ? ` (${lineup.sp.throws})` : ""}` : "  SP: TBD";
+  const playerLines = lineup.players.length
+    ? lineup.players.map((p) => `  ${p.order}. ${p.position.padEnd(3)} ${p.name}${p.bats ? ` (${p.bats})` : ""}`)
+    : ["  (no lineup)"];
+  return [statusLabel, spLine, ...playerLines].join("\n");
+}
+
 function formatSnapshot(snapshot) {
   const ts = new Date(snapshot.scrapedAt).toLocaleString("en-US", {
     timeZone: "America/Denver",
@@ -159,11 +222,14 @@ function formatSnapshot(snapshot) {
     hour: "2-digit", minute: "2-digit", second: "2-digit",
     hour12: false,
   });
-  const lines = [`MLB Lineups -- scraped ${ts} MT`, ""];
+  const lines = [`MLB Lineups — scraped ${ts} MT`, ""];
   for (const game of snapshot.games) {
     lines.push(`${game.awayTeam} @ ${game.homeTeam}  |  ${game.gameTime}`);
-    lines.push(`  AWAY (${game.awayLineup.status.toUpperCase()}): ${game.awayLineup.players.join(", ") || "(no players)"}`);
-    lines.push(`  HOME (${game.homeLineup.status.toUpperCase()}): ${game.homeLineup.players.join(", ") || "(no players)"}`);
+    lines.push(`AWAY — ${formatLineupSide(game.awayLineup)}`);
+    lines.push("");
+    lines.push(`HOME — ${formatLineupSide(game.homeLineup)}`);
+    lines.push("");
+    lines.push("─".repeat(48));
     lines.push("");
   }
   return lines.join("\n");
@@ -211,7 +277,10 @@ async function overwritePageWithMarkdown(pageId, markdown) {
   const blocks = await listAllChildBlocks(pageId);
   if (blocks.length) await archiveBlocks(blocks);
   const chunks = splitIntoParagraphChunks(markdown);
-  const children = chunks.map((chunk) => ({ object: "block", type: "paragraph", paragraph: { rich_text: [{ type: "text", text: { content: chunk } }] } }));
+  const children = chunks.map((chunk) => ({
+    object: "block", type: "paragraph",
+    paragraph: { rich_text: [{ type: "text", text: { content: chunk } }] },
+  }));
   const batchSize = 20;
   for (let i = 0; i < children.length; i += batchSize) {
     await notion.blocks.children.append({ block_id: pageId, children: children.slice(i, i + batchSize) });
