@@ -25,23 +25,29 @@ const ROTOWIRE_URL =
   ROTOWIRE_LINEUPS_URL || "https://www.rotowire.com/baseball/daily-lineups.php";
 
 // ---------------------------------------------------------------------------
-// BROWSER HELPER — uses Browserless /content API
-// Browserless renders the page in a real Chrome instance on their servers
-// and returns the fully-rendered HTML. No local Chrome needed.
+// BROWSER HELPER — uses Browserless V2 /content API
+// Docs: https://docs.browserless.io/http-apis/content
 // ---------------------------------------------------------------------------
 
 async function getRenderedHtml() {
   const response = await axios.post(
-    `https://chrome.browserless.io/content?token=${BROWSERLESS_TOKEN}`,
+    `https://production-sfo.browserless.io/content?token=${BROWSERLESS_TOKEN}`,
     {
       url: ROTOWIRE_URL,
-      waitFor: ".lineup__list",  // wait until lineup cards are in the DOM
+      bestAttempt: true,
+      gotoOptions: { waitUntil: "networkidle2" },
+      waitForSelector: {
+        selector: ".lineup__list",
+        timeout: 15000,
+      },
       rejectResourceTypes: ["image", "font", "media"],
     },
     {
-      headers: { "Content-Type": "application/json" },
-      timeout: 30000,
-      // response is raw HTML text
+      headers: {
+        "Content-Type": "application/json",
+        "Cache-Control": "no-cache",
+      },
+      timeout: 35000,
       responseType: "text",
     }
   );
