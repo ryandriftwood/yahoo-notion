@@ -44,21 +44,17 @@ async function getRenderedHtml() {
   return response.data;
 }
 
-// DEBUG: first 5000 chars of full page HTML
 export async function getRawHtml() {
   return (await getRenderedHtml()).slice(0, 5000);
 }
 
-// DEBUG: raw HTML of the first game card (up to 3000 chars)
+// DEBUG: raw HTML of the first game card — 8000 chars to capture player list
 export async function getFirstCardHtml() {
   const html = await getRenderedHtml();
-  // Grab from the first lineup card div through to the second one (or 3000 chars)
   const start = html.indexOf('class="lineup is-mlb');
   if (start === -1) return "[No lineup card found — class='lineup is-mlb' not present in HTML]";
-  // Walk back to the opening < of that div
   const divStart = html.lastIndexOf("<", start);
-  const snippet = html.slice(divStart, divStart + 3000);
-  return snippet;
+  return html.slice(divStart, divStart + 8000);
 }
 
 // ---------------------------------------------------------------------------
