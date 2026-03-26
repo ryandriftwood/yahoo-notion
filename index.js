@@ -5,7 +5,7 @@ import { loadTokens } from "./yahoo.js";
 import { runSync } from "./sync.js";
 import { seasonStatsRouteHandler } from "./seasonstats.js";
 import { sevenDayStatsRouteHandler } from "./sevendaystats.js";
-import { runLineupSync } from "./rotowire.js";
+import { runLineupSync, scrapeRotowireLineups, getRawHtml } from "./rotowire.js";
 
 const app = express();
 
@@ -56,6 +56,26 @@ app.post("/sync/lineups", async (req, res) => {
 		res.json({ ok: true, result });
 	} catch (e) {
 		res.status(500).json({ ok: false, error: String(e?.response?.data || e?.message || e) });
+	}
+});
+
+// Returns the parsed snapshot as JSON so you can see what the scraper found
+app.get("/debug/lineups", async (req, res) => {
+	try {
+		const snapshot = await scrapeRotowireLineups();
+		res.json(snapshot);
+	} catch (e) {
+		res.status(500).json({ error: String(e?.message || e) });
+	}
+});
+
+// Returns the first 5000 chars of the raw text Rotowire sends back
+app.get("/debug/lineups/raw", async (req, res) => {
+	try {
+		const raw = await getRawHtml();
+		res.type("text/plain").send(raw.slice(0, 5000));
+	} catch (e) {
+		res.status(500).send(String(e?.message || e));
 	}
 });
 
