@@ -32,7 +32,7 @@ async function getRenderedHtml() {
       url: ROTOWIRE_URL,
       bestAttempt: true,
       gotoOptions: { waitUntil: "networkidle2" },
-      waitForSelector: { selector: ".lineup__list", timeout: 15000 },
+      waitForSelector: { selector: ".lineup__player", timeout: 15000 },
       rejectResourceTypes: ["image", "font", "media"],
     },
     {
@@ -48,11 +48,10 @@ export async function getRawHtml() {
   return (await getRenderedHtml()).slice(0, 5000);
 }
 
-// DEBUG: raw HTML of the first game card — 8000 chars to capture player list
 export async function getFirstCardHtml() {
   const html = await getRenderedHtml();
   const start = html.indexOf('class="lineup is-mlb');
-  if (start === -1) return "[No lineup card found — class='lineup is-mlb' not present in HTML]";
+  if (start === -1) return "[No lineup card found]";
   const divStart = html.lastIndexOf("<", start);
   return html.slice(divStart, divStart + 8000);
 }
@@ -65,28 +64,41 @@ export async function scrapeRotowireLineups() {
   const html = await getRenderedHtml();
   const games = [];
 
+  // Each game card
   const gameCardRe = /<div[^>]+class="[^"]*lineup is-mlb[^"]*"[^>]*>([\s\S]*?)(?=<div[^>]+class="[^"]*lineup is-mlb|<\/section|$)/g;
   let cardMatch;
 
   while ((cardMatch = gameCardRe.exec(html)) !== null) {
     const card = cardMatch[1];
 
+    // Team abbreviations
     const abbrRe = /<div[^>]+class="[^"]*lineup__abbr[^"]*"[^>]*>([^<]+)<\/div>/g;
     const abbrs = [...card.matchAll(abbrRe)];
     const awayTeam = abbrs[0]?.[1]?.trim() ?? "AWAY";
     const homeTeam = abbrs[1]?.[1]?.trim() ?? "HOME";
     if (awayTeam === "AWAY" && homeTeam === "HOME") continue;
 
+    // Game time
     const timeMatch = card.match(/<div[^>]+class="[^"]*lineup__time[^"]*"[^>]*>([^<]+)<\/div>/);
     const gameTime = timeMatch?.[1]?.trim() ?? "";
 
+    // Two lineup lists (away first, home second)
     const listRe = /<ul[^>]+class="([^"]*lineup__list[^"]*?)"[^>]*>([\s\S]*?)<\/ul>/g;
     const lists = [...card.matchAll(listRe)];
 
     const parseList = (listHtml, classAttr) => {
+      // Status comes from the ul class: is-confirmed or default projected
       const status = classAttr.includes("is-confirmed") ? "confirmed" : "projected";
-      const playerRe = /<a[^>]+class="[^"]*lineup__player[^"]*"[^>]*>([^<]+)<\/a>/g;
-      const players = [...listHtml.matchAll(playerRe)].map((m) => m[1].trim()).filter(Boolean);
+
+      // Each player is <li class="lineup__player">...<a title="Full Name" href="...">...</a>...
+      // Grab the title attribute for full name, fall back to link text
+      const playerRe = /<li[^>]+class="[^"]*lineup__player[^"]*"[^>]*>[\s\S]*?<a[^>]+(?:title="([^"]+)"[^>]*|[^>]*)>([^<]+)<\/a>/g;
+      const players = [];
+      let pm;
+      while ((pm = playerRe.exec(listHtml)) !== null) {
+        const name = (pm[1] || pm[2] || "").trim();
+        if (name) players.push(name);
+      }
       return { status, players };
     };
 
