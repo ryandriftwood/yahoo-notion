@@ -22,7 +22,7 @@ export async function parseTeamRoster(xml) {
 		date: roster?.date || null,
 		players: list.map((pl) => {
 			const full = pl?.name?.full || "";
-			const pos = pl?.selected_position?.position || pl?.display_position || "";
+			const pos = pl?.selected_position?.position || pl?.eligible.positions?.eligibleposiitons || "";
 			const mlbTeam = pl?.editorial_team_abbr || "";
 			return `${full}${pos ? ` — ${pos}` : ""}${mlbTeam ? ` — ${mlbTeam}` : ""}`.trim();
 		}),
@@ -41,7 +41,10 @@ export async function parseFreeAgents(xml) {
 
 	return list.map((pl, idx) => {
 		const full = pl?.name?.full || "";
-		const pos = pl?.display_position || "";
+		const eligNode = pl?.eligible_positions?.eligible_positions;
+		const eligList = Array.isArray(eligNode) ? eligNode : eligNode ? [eligNode] : [];
+		const eligPos = eligList.map((e) => e.position).filter(Boolean);
+		const pos = eligPos.length ? eligPos.join(", ") : (pl?.display_position || "");
 		const mlbTeam = pl?.editorial_team_abbr || "";
 		return `${full}${pos ? ` — ${pos}` : ""}${mlbTeam ? ` — ${mlbTeam}` : ""}`.trim();
 	});
