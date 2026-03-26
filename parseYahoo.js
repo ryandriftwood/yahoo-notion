@@ -46,33 +46,33 @@ export async function parseTeamRoster(xml) {
 }
 
 export async function parseFreeAgents(xml) {
-	const p = await parseXml(xml);
+  const p = await parseXml(xml);
 
-	// Typical shape: fantasy_content -> league -> players -> player
-	const league = p?.fantasy_content?.league;
-	const playersNode = league?.players;
-	const players = playersNode?.player;
+  // Typical shape: fantasy_content -> league -> players -> player
+  const league = p?.fantasy_content?.league;
+  const playersNode = league?.players;
+  const players = playersNode?.player;
 
-	const list = Array.isArray(players) ? players : players ? [players] : [];
+  const list = Array.isArray(players) ? players : players ? [players] : [];
 
-	return list.map((pl, idx) => {
-		const full = pl?.name?.full || "";
-		const eligNode = pl?.eligible_positions?.eligible_positions;
-		const eligList = Array.isArray(eligNode) ? eligNode : eligNode ? [eligNode] : [];
-		const eligPos = eligList.map((e) => e.position).filter(Boolean);
-		const pos = eligPos.length ? eligPos.join(", ") : (pl?.display_position || "");
-		const mlbTeam = pl?.editorial_team_abbr || "";
-		const ownershipType =
-			pl?.ownership?.ownership_type ||
-			pl?.ownership_type ||            // depending on how xml2js shaped it
-			"";
+  return list.map((pl) => {
+    const full = pl?.name?.full || "";
+    const eligNode = pl?.eligible_positions?.eligible_position || pl?.eligible_positions;
+    const eligList = Array.isArray(eligNode) ? eligNode : eligNode ? [eligNode] : [];
+    const eligPos = eligList.map((e) => e.position || e).filter(Boolean);
+    const pos = eligPos.length ? eligPos.join(", ") : pl?.display_position || "";
+    const mlbTeam = pl?.editorial_team_abbr || "";
+    const ownershipType =
+      pl?.ownership?.ownership_type ||
+      pl?.ownership_type ||
+      "";
 
-		const isWaivers =
-			typeof ownershipType === "string" &&
-			ownershipType.toLowerCase().includes("waiver");
+    const isWaivers =
+      typeof ownershipType === "string" &&
+      ownershipType.toLowerCase().includes("waiver");
 
-		const waiverTag = isWaivers ? " — W" : ""; // or " — waiver" if you prefer
+    const waiverTag = isWaivers ? " — W" : "";
 
-		return `${full}${pos ? ` — ${pos}` : ""}${mlbTeam ? ` — ${mlbTeam}` : ""}${waiverTag}`.trim();
-	});
+    return `${full}${pos ? ` — ${pos}` : ""}${mlbTeam ? ` — ${mlbTeam}` : ""}${waiverTag}`.trim();
+  });
 }
