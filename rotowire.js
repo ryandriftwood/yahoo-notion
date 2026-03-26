@@ -22,93 +22,113 @@ const notion = new NotionClient({ auth: NOTION_TOKEN });
 const ROTOWIRE_URL =
   ROTOWIRE_LINEUPS_URL || "https://www.rotowire.com/baseball/daily-lineups.php";
 
+// Positions used to identify player lines in the text
+const POSITIONS = new Set(["C","1B","2B","3B","SS","LF","CF","RF","DH","P","SP"]);
+
 // ---------------------------------------------------------------------------
 // 1.  SCRAPE
 // ---------------------------------------------------------------------------
 
 /**
- * Fetches Rotowire and returns a structured snapshot:
+ * Fetches Rotowire and parses the plain-text response.
+ *
+ * Rotowire renders each game block as:
+ *   <time> ET
+ *   AWAY_ABBR
+ *   HOME_ABBR
+ *   ...
+ *   - Confirmed Lineup   (or Expected Lineup / Projected Lineup)
+ *   - POS  Player Name H
+ *   - $salary
+ *   ...
+ *   - Confirmed Lineup   (second team)
+ *   - POS  Player Name H
+ *   ...
+ *
+ * Returns:
  * {
  *   scrapedAt: ISO string,
- *   games: [
- *     {
- *       gameId: string,          // e.g. "NYY-BOS"
- *       awayTeam: string,
- *       homeTeam: string,
- *       gameTime: string,
- *       awayLineup: { status: "confirmed"|"projected", players: string[] },
- *       homeLineup: { status: "confirmed"|"projected", players: string[] },
- *     },
- *     ...
- *   ]
+ *   games: [{ gameId, awayTeam, homeTeam, gameTime,
+ *             awayLineup: { status, players },
+ *             homeLineup: { status, players } }]
  * }
  */
 export async function scrapeRotowireLineups() {
-  const { data: html } = await axios.get(ROTOWIRE_URL, {
+  const { data: text } = await axios.get(ROTOWIRE_URL, {
     headers: { "User-Agent": "Mozilla/5.0 (compatible; yahoo-notion-bot/1.0)" },
     timeout: 15000,
   });
 
+  // Split into lines, trim each
+  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+
   const games = [];
 
-  // Each game card lives in a <div class="lineup is-mlb">
-  // We parse with regex because we don't have a DOM; keeps deps minimal.
-  const gameCardRe =
-    /<div[^>]+class="[^"]*lineup is-mlb[^"]*"[^>]*>([\s\S]*?)(?=<div[^>]+class="[^"]*lineup is-mlb|$)/g;
-  let cardMatch;
+  // Time pattern: "1:15 PM ET", "10:10 PM ET", etc.
+  const timeRe = /^\d{1,2}:\d{2}\s+[AP]M\s+ET$/;
+  // Status line patterns
+  const statusRe = /^(Confirmed|Expected|Projected)\s+Lineup$/i;
+  // Player position line: "CF  Oneil Cruz L" or "2B  B. Reynolds S"
+  // Position is first token, rest is player name + handedness
+  const posPlayerRe = /^([A-Z0-9]{1,3})\s{2,}(.+?)\s+[LRBS]$/;
 
-  while ((cardMatch = gameCardRe.exec(html)) !== null) {
-    const card = cardMatch[1];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
 
-    // Team abbreviations from .lineup__abbr divs
-    const teamAbbrRe = /<div[^>]+class="[^"]*lineup__abbr[^"]*"[^>]*>([^<]+)<\/div>/g;
-    const teamMatches = [...card.matchAll(teamAbbrRe)];
-    const awayTeam = teamMatches[0]?.[1]?.trim() ?? "AWAY";
-    const homeTeam = teamMatches[1]?.[1]?.trim() ?? "HOME";
-    const gameId = `${awayTeam}-${homeTeam}`;
+    // Look for a game time line
+    if (!timeRe.test(line)) { i++; continue; }
 
-    // Game time from .lineup__time
-    const timeMatch = card.match(
-      /<div[^>]+class="[^"]*lineup__time[^"]*"[^>]*>([^<]+)<\/div>/
-    );
-    const gameTime = timeMatch?.[1]?.trim() ?? "";
+    const gameTime = line;
+    i++;
 
-    // Each side's lineup list; class includes "is-confirmed" or "is-projected"
-    const listRe =
-      /<ul[^>]+class="([^"]*lineup__list[^"]*?)"[^>]*>([\s\S]*?)<\/ul>/g;
-    const lists = [...card.matchAll(listRe)];
+    // Skip "Watch Now Tickets" / "Alerts" noise lines
+    while (i < lines.length && !lines[i].match(/^[A-Z]{2,3}$/) && !timeRe.test(lines[i])) i++;
 
-    const parseList = (listHtml, classAttr) => {
-      const status = classAttr.includes("is-confirmed")
-        ? "confirmed"
-        : "projected";
-      const playerRe = /<a[^>]+class="[^"]*lineup__player[^"]*"[^>]*>([^<]+)<\/a>/g;
-      const players = [...listHtml.matchAll(playerRe)].map((m) =>
-        m[1].trim()
-      );
+    // Next meaningful token should be AWAY team abbr
+    const awayTeam = lines[i] ?? "AWAY";
+    i++;
+
+    // Skip junk between abbrs
+    while (i < lines.length && !lines[i].match(/^[A-Z]{2,3}$/) && !statusRe.test(lines[i]) && !timeRe.test(lines[i])) i++;
+
+    const homeTeam = lines[i] ?? "HOME";
+    i++;
+
+    // Now scan for two lineup blocks (away first, then home)
+    const parseNextLineup = () => {
+      // Advance until we hit a status line
+      while (i < lines.length && !statusRe.test(lines[i]) && !timeRe.test(lines[i])) i++;
+      if (i >= lines.length || timeRe.test(lines[i])) return null;
+
+      const statusMatch = lines[i].match(statusRe);
+      const status =
+        statusMatch?.[1]?.toLowerCase() === "confirmed" ? "confirmed" : "projected";
+      i++;
+
+      const players = [];
+      // Collect player lines until next status block, time line, or section break
+      while (i < lines.length) {
+        const l = lines[i];
+        if (timeRe.test(l) || statusRe.test(l)) break;
+        // Skip salary lines ($3,400) and other noise
+        if (l.startsWith("$") || l.startsWith("-") || l.match(/^\d+-\d+/) || l.match(/^\*\*/) || l.match(/^LINE|^O\/U|^Umpire|^Watch|^Alerts|^Dome|^Precipitation|^Wind|^Temperature/i)) {
+          i++; continue;
+        }
+        const m = l.match(posPlayerRe);
+        if (m && POSITIONS.has(m[1])) {
+          players.push(`${m[1]} ${m[2].trim()}`);
+        }
+        i++;
+      }
       return { status, players };
     };
 
-    const awayLineup =
-      lists[0]
-        ? parseList(lists[0][2], lists[0][1])
-        : { status: "projected", players: [] };
-    const homeLineup =
-      lists[1]
-        ? parseList(lists[1][2], lists[1][1])
-        : { status: "projected", players: [] };
+    const awayLineup = parseNextLineup() ?? { status: "projected", players: [] };
+    const homeLineup = parseNextLineup() ?? { status: "projected", players: [] };
 
-    // skip cards that produced no useful data
-    if (awayTeam === "AWAY" && homeTeam === "HOME" && !gameTime) continue;
-
-    games.push({
-      gameId,
-      awayTeam,
-      homeTeam,
-      gameTime,
-      awayLineup,
-      homeLineup,
-    });
+    const gameId = `${awayTeam}-${homeTeam}`;
+    games.push({ gameId, awayTeam, homeTeam, gameTime, awayLineup, homeLineup });
   }
 
   return { scrapedAt: new Date().toISOString(), games };
@@ -124,7 +144,6 @@ export async function scrapeRotowireLineups() {
  * (projected <-> confirmed).
  */
 export function hasLineupChanged(oldSnapshot, newSnapshot) {
-  // First run ever — treat as a change so the initial state is written
   if (!oldSnapshot) return true;
 
   const oldMap = Object.fromEntries(
@@ -134,7 +153,6 @@ export function hasLineupChanged(oldSnapshot, newSnapshot) {
     (newSnapshot.games || []).map((g) => [g.gameId, g])
   );
 
-  // Different set of games (postponements, added games, etc.)
   const oldIds = Object.keys(oldMap).sort();
   const newIds = Object.keys(newMap).sort();
   if (JSON.stringify(oldIds) !== JSON.stringify(newIds)) return true;
@@ -143,13 +161,9 @@ export function hasLineupChanged(oldSnapshot, newSnapshot) {
     const o = oldMap[id];
     const n = newMap[id];
     if (!o || !n) return true;
-
     for (const side of ["awayLineup", "homeLineup"]) {
-      // Status change (e.g. projected -> confirmed)
       if (o[side].status !== n[side].status) return true;
-      // Any player added, removed, or reordered
-      if (JSON.stringify(o[side].players) !== JSON.stringify(n[side].players))
-        return true;
+      if (JSON.stringify(o[side].players) !== JSON.stringify(n[side].players)) return true;
     }
   }
 
@@ -193,7 +207,7 @@ function formatSnapshot(snapshot) {
 }
 
 // ---------------------------------------------------------------------------
-// 4.  NOTION HELPERS (self-contained, no dependency on notion.js)
+// 4.  NOTION HELPERS
 // ---------------------------------------------------------------------------
 
 async function listAllChildBlocks(blockId) {
@@ -294,9 +308,6 @@ async function logLineupRun({ label, gamesCount, changesDetected }) {
 
 // ---------------------------------------------------------------------------
 // 5.  SNAPSHOT STATE
-//     _lastSnapshot is in-memory (survives repeated calls in the same process).
-//     Swap loadLastSnapshot / saveSnapshot with DB reads/writes if you need
-//     persistence across server restarts or multiple workers.
 // ---------------------------------------------------------------------------
 
 let _lastSnapshot = null;
@@ -313,14 +324,6 @@ async function saveSnapshot(snapshot) {
 // 6.  MAIN ENTRY POINT
 // ---------------------------------------------------------------------------
 
-/**
- * runLineupSync()
- *  1. Scrape Rotowire
- *  2. Diff against last snapshot
- *  3. No change  -> return early
- *  4. Changed    -> archive old lineup page, write new lineup page
- *  5. Log run to Notion DB
- */
 export async function runLineupSync() {
   const newSnapshot = await scrapeRotowireLineups();
   const oldSnapshot = await loadLastSnapshot();
@@ -336,20 +339,16 @@ export async function runLineupSync() {
     `[lineup] Changes detected (${newSnapshot.games.length} games). Updating Notion...`
   );
 
-  // Move current "new" page content to the "old" archive page
   if (oldSnapshot) {
     const oldMd = formatSnapshot(oldSnapshot);
     await overwritePageWithMarkdown(NOTION_LINEUP_OLD_PAGE_ID, oldMd);
   }
 
-  // Write the freshly scraped lineup to the live "new" page
   const newMd = formatSnapshot(newSnapshot);
   await overwritePageWithMarkdown(NOTION_LINEUP_NEW_PAGE_ID, newMd);
 
-  // Save for next comparison
   await saveSnapshot(newSnapshot);
 
-  // Log to Notion database
   const ts = new Date(newSnapshot.scrapedAt).toLocaleString("en-US", {
     timeZone: "America/Denver",
     month: "2-digit",
