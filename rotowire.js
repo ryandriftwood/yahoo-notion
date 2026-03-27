@@ -91,8 +91,8 @@ function parseList(listHtml) {
     }
   }
 
-  // 3. Batters: <li class="lineup__player">
-  const liRe = /<li[^>]+class="[^"]*lineup__player[^"]*"[^>]*>([\s\S]*?)<\/li>/g;
+  // 3. Batters: <li class="lineup__player"> — explicitly exclude lineup__player-highlight
+  const liRe = /<li[^>]+class="[^"]*\blineup__player\b(?!-highlight)[^"]*"[^>]*>([\s\S]*?)<\/li>/g;
   const players = [];
   let li;
   let order = 1;
