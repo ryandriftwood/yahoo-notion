@@ -328,9 +328,15 @@ export async function runLineupSync() {
   console.log(`[lineup] Changes detected (${newSnapshot.games.length} games). Updating Notion...`);
   if (oldSnapshot) await overwritePageWithMarkdown(NOTION_LINEUP_OLD_PAGE_ID, formatSnapshot(oldSnapshot));
   await overwritePageWithMarkdown(NOTION_LINEUP_NEW_PAGE_ID, formatSnapshot(newSnapshot));
-  await saveSnapshot(newSnapshot);
 
   const ts = new Date(newSnapshot.scrapedAt).toLocaleString("en-US", { timeZone: "America/Denver", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
   await logLineupRun({ label: `Lineup update ${ts}`, gamesCount: newSnapshot.games.length, changesDetected: true });
+
+  try {
+    await saveSnapshot(newSnapshot);
+  } catch (err) {
+    console.error("[lineup] Failed to save snapshot to DB:", err.message);
+  }
+
   return { changed: true, games: newSnapshot.games.length };
 }
