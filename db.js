@@ -20,4 +20,12 @@ export async function ensureTables() {
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		);
 	`);
+
+	await pool.query(`
+		CREATE TABLE IF NOT EXISTS lineup_snapshot (
+			id TEXT PRIMARY KEY DEFAULT 'current',
+			snapshot JSONB NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+	`);
 }

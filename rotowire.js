@@ -1,6 +1,7 @@
 // rotowire.js
 import axios from "axios";
 import { Client as NotionClient } from "@notionhq/client";
+import { pool } from "./db.js";
 import {
   NOTION_TOKEN,
   ROTOWIRE_LINEUPS_URL,
@@ -66,27 +67,7 @@ function getAttr(tagHtml, attrName) {
 }
 
 // ---------------------------------------------------------------------------
-// PARSE ONE LINEUP LIST (<ul class="lineup__list is-visit"> or is-home)
-//
-// Actual Rotowire HTML structure (confirmed from inspection):
-//
-//   <ul class="lineup__list is-visit">  (or is-home)
-//     <li class="lineup__player-highlight">   <-- SP
-//       <div class="lineup__player-highlight-name">
-//         <a href="...">Paul Skenes</a>
-//         <span class="lineup__throws">R</span>
-//       </div>
-//     </li>
-//     <li class="lineup__status is-confirmed">  <-- status indicator (may be absent if projected)
-//       ...Confirmed Lineup
-//     </li>
-//     <li class="lineup__player">  <-- batters 1-9
-//       <div class="lineup__pos">CF</div>
-//       <a title="Oneil Cruz" href="...">Oneil Cruz</a>
-//       <span class="lineup__bats">L</span>
-//     </li>
-//     ... (salary <li> elements interspersed — ignored)
-//   </ul>
+// PARSE ONE LINEUP LIST
 // ---------------------------------------------------------------------------
 
 function parseList(listHtml) {
@@ -117,19 +98,15 @@ function parseList(listHtml) {
   let order = 1;
   while ((li = liRe.exec(listHtml)) !== null) {
     const liContent = li[1];
-
     const posMatch = liContent.match(/<div[^>]+class="[^"]*lineup__pos[^"]*"[^>]*>([^<]+)<\/div>/);
     const position = posMatch?.[1]?.trim() ?? "";
-
     const aMatch = liContent.match(/<a([^>]+)>([^<]+)<\/a>/);
     if (!aMatch) continue;
     const title = getAttr(aMatch[1], "title");
     const name = (title || aMatch[2]).trim();
     if (!name) continue;
-
     const batsMatch = liContent.match(/<span[^>]+class="[^"]*lineup__bats[^"]*"[^>]*>([^<]+)<\/span>/);
     const bats = batsMatch?.[1]?.trim() ?? "";
-
     players.push({ order, position, name, bats });
     order++;
   }
@@ -145,36 +122,29 @@ export async function scrapeRotowireLineups() {
   const html = await getRenderedHtml();
   const games = [];
 
-  // Rotowire adds has-started to the card class once the game begins
   const gameCardRe = /<div[^>]+class="[^"]*lineup is-mlb[^"]*"[^>]*>([\s\S]*?)(?=<div[^>]+class="[^"]*lineup is-mlb|<\/section|$)/g;
   let cardMatch;
 
   while ((cardMatch = gameCardRe.exec(html)) !== null) {
     const card = cardMatch[1];
 
-    // Team abbreviations
     const abbrRe = /<div[^>]+class="[^"]*lineup__abbr[^"]*"[^>]*>([^<]+)<\/div>/g;
     const abbrs = [...card.matchAll(abbrRe)];
     const awayTeam = abbrs[0]?.[1]?.trim() ?? "AWAY";
     const homeTeam = abbrs[1]?.[1]?.trim() ?? "HOME";
     if (awayTeam === "AWAY" && homeTeam === "HOME") continue;
 
-    // Game time
     const timeMatch = card.match(/<div[^>]+class="[^"]*lineup__time[^"]*"[^>]*>([^<]+)<\/div>/);
     const gameTime = timeMatch?.[1]?.trim() ?? "";
 
-    // Game started flag
     const hasStarted = /class="[^"]*lineup is-mlb[^"]*has-started[^"]*"/.test(cardMatch[0].slice(0, 200));
 
-    // Two lineup lists: is-visit (away) and is-home
-    // Match both <ul class="lineup__list ..."> blocks
     const listRe = /<ul[^>]+class="[^"]*lineup__list[^"]*"[^>]*>([\s\S]*?)<\/ul>/g;
     const lists = [...card.matchAll(listRe)];
 
     const awayLineup = lists[0] ? parseList(lists[0][1]) : { status: "projected", sp: null, players: [] };
     const homeLineup = lists[1] ? parseList(lists[1][1]) : { status: "projected", sp: null, players: [] };
 
-    // Games that have started are definitionally confirmed
     if (hasStarted) {
       awayLineup.status = "confirmed";
       homeLineup.status = "confirmed";
@@ -313,12 +283,33 @@ async function logLineupRun({ label, gamesCount, changesDetected }) {
 }
 
 // ---------------------------------------------------------------------------
-// 5.  SNAPSHOT STATE
+// 5.  SNAPSHOT STATE — persisted to Postgres
+//     Single row with id='current', overwritten on every change.
+//     Table is created by ensureTables() in db.js on startup.
 // ---------------------------------------------------------------------------
 
-let _lastSnapshot = null;
-async function loadLastSnapshot() { return _lastSnapshot; }
-async function saveSnapshot(snapshot) { _lastSnapshot = snapshot; }
+async function loadLastSnapshot() {
+  try {
+    const { rows } = await pool.query(
+      "SELECT snapshot FROM lineup_snapshot WHERE id = 'current'"
+    );
+    return rows.length > 0 ? rows[0].snapshot : null;
+  } catch (err) {
+    console.error("[lineup] Failed to load snapshot from DB:", err.message);
+    return null;
+  }
+}
+
+async function saveSnapshot(snapshot) {
+  await pool.query(
+    `INSERT INTO lineup_snapshot (id, snapshot, updated_at)
+     VALUES ('current', $1, NOW())
+     ON CONFLICT (id) DO UPDATE
+       SET snapshot = EXCLUDED.snapshot,
+           updated_at = EXCLUDED.updated_at`,
+    [JSON.stringify(snapshot)]
+  );
+}
 
 // ---------------------------------------------------------------------------
 // 6.  MAIN ENTRY POINT
