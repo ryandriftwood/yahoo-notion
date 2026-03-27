@@ -7,6 +7,18 @@ import { overwritePageWithTable } from "./notiontables.js";
 requireEnv("YAHOO_LEAGUE_KEY", YAHOO_LEAGUE_KEY);
 requireEnv("NOTION_SEASON_STATS_PAGE_ID", NOTION_SEASON_STATS_PAGE_ID);
 
+// Stat ID → column name mapping derived from league scoring settings
+// Batters:  7=R, 12=HR, 13=RBI, 16=SB, 55=OPS, 60=H/AB
+// Pitchers: 26=ERA, 27=WHIP, 28=SV, 50=IP, 57=K/9, 85=QS
+const BATTER_STAT_IDS   = ["7",  "12",  "13",  "16",  "55",   "60"];
+const BATTER_STAT_NAMES  = ["R",  "HR",  "RBI", "SB",  "OPS",  "H/AB"];
+const PITCHER_STAT_IDS   = ["26", "27",  "28",  "50",  "57",   "85"];
+const PITCHER_STAT_NAMES = ["ERA","WHIP","SV",  "IP",  "K/9",  "QS"];
+
+// Combined ordered list for the table columns
+const ALL_STAT_IDS   = [...BATTER_STAT_IDS,   ...PITCHER_STAT_IDS];
+const ALL_STAT_NAMES = [...BATTER_STAT_NAMES, ...PITCHER_STAT_NAMES];
+
 async function parseXml(xml) {
 	return parseStringPromise(xml, { explicitArray: false, mergeAttrs: true, ignoreAttrs: false });
 }
@@ -39,7 +51,7 @@ function getStatMapFromPlayer(pl) {
 	return out;
 }
 
-async function fetchPlayersByOverallRank({ target = 500, statusFilter = "FA" }) {
+async function fetchPlayersByOverallRank({ target = 1000 }) {
 	const pageSize = 25;
 	let start = 0;
 	let all = [];
@@ -48,8 +60,9 @@ async function fetchPlayersByOverallRank({ target = 500, statusFilter = "FA" }) 
 		const remaining = target - all.length;
 		const count = Math.min(pageSize, remaining);
 
+		// status=A returns ALL players (owned + FA + waivers)
 		const xml = await yahooFantasyGetXml(
-			`league/${YAHOO_LEAGUE_KEY}/players;status=${statusFilter};sort=OR;start=${start};count=${count}`
+			`league/${YAHOO_LEAGUE_KEY}/players;status=A;sort=OR;start=${start};count=${count}`
 		);
 
 		const parsed = await parseXml(xml);
@@ -64,7 +77,6 @@ async function fetchPlayersByOverallRank({ target = 500, statusFilter = "FA" }) 
 }
 
 async function fetchSeasonStatsForPlayerKeys(playerKeysCsv) {
-	// NOTE: This URL shape may need a tweak depending on Yahoo response shape in your league.
 	const xml = await yahooFantasyGetXml(
 		`league/${YAHOO_LEAGUE_KEY}/players;player_keys=${playerKeysCsv}/stats`
 	);
@@ -83,12 +95,11 @@ function mergeStatsIntoPlayers(players, statsByKey) {
 	return players.map((p) => ({ ...p, statMap: m.get(p.player_key) || {} }));
 }
 
-export async function runSeasonStatsSync({ statusFilter = "FA", target = 500 } = {}) {
+export async function runSeasonStatsSync({ target = 1000 } = {}) {
 	const started = new Date().toISOString();
 
-	const players = await fetchPlayersByOverallRank({ target, statusFilter });
+	const players = await fetchPlayersByOverallRank({ target });
 
-	// batch stats per 25
 	const pageSize = 25;
 	let statsRows = [];
 
@@ -103,17 +114,21 @@ export async function runSeasonStatsSync({ statusFilter = "FA", target = 500 } =
 
 	const merged = mergeStatsIntoPlayers(players, statsRows);
 
-	const columns = ["OR Rank", "Player", "Team", "Pos", "Status", "player_key", "Stats (raw ids)"];
+	const columns = ["OR Rank", "Player", "Team", "Pos", "Status", "player_key", ...ALL_STAT_NAMES];
 
-	const rows = merged.map((p, idx) => {
-		const entries = Object.entries(p.statMap || {}).slice(0, 12);
-		const compact = entries.map(([k, v]) => `${k}:${v}`).join(" | ");
-		return [String(idx + 1), p.full, p.mlbTeam, p.positions, p.status, p.player_key, compact];
-	});
+	const rows = merged.map((p, idx) => [
+		String(idx + 1),
+		p.full,
+		p.mlbTeam,
+		p.positions,
+		p.status,
+		p.player_key,
+		...ALL_STAT_IDS.map((id) => p.statMap?.[id] ?? ""),
+	]);
 
 	await overwritePageWithTable(
 		NOTION_SEASON_STATS_PAGE_ID,
-		[`Season stats — Top ${target} by OR (status=${statusFilter})`, `Last synced: ${started}`],
+		[`Season stats — Top ${target} by OR (all players)`, `Last synced: ${started}`],
 		columns,
 		rows
 	);
@@ -124,8 +139,8 @@ export async function runSeasonStatsSync({ statusFilter = "FA", target = 500 } =
 export function seasonStatsRouteHandler() {
 	return async (req, res) => {
 		try {
-			const status = (req.query.status || "FA").toString();
-			const result = await runSeasonStatsSync({ statusFilter: status, target: 500 });
+			const target = Number(req.query.target || 1000);
+			const result = await runSeasonStatsSync({ target });
 			return res.json({ ok: true, result });
 		} catch (e) {
 			return res
