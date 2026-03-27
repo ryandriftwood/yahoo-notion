@@ -1,6 +1,9 @@
 // fantasyinfocentral.js
 // Scrapes FantasyInfoCentral daily matchups (batter vs pitcher) and SB predictions,
 // then overwrites the corresponding Notion landing pages.
+//
+// Both sites use a ?date=YYYY-MM-DD query param to select the day.
+// No tab/DOM detection needed — we compute today and tomorrow in MT and build the URL.
 
 import axios from "axios";
 import * as cheerio from "cheerio";
@@ -23,21 +26,36 @@ requireEnv("FIC_BVP_TOMORROW_PAGE_ID", FIC_BVP_TOMORROW_PAGE_ID);
 requireEnv("FIC_SB_TODAY_PAGE_ID", FIC_SB_TODAY_PAGE_ID);
 requireEnv("FIC_SB_TOMORROW_PAGE_ID", FIC_SB_TOMORROW_PAGE_ID);
 
-const notion = new NotionClient({ auth: NOTION_TOKEN });
+const BVP_BASE = "https://www.fantasyinfocentral.com/mlb/daily-matchups";
+const SB_BASE  = "https://www.fantasyinfocentral.com/betting/mlb/sb-predictions";
 
-const BVP_URL = "https://www.fantasyinfocentral.com/mlb/daily-matchups";
-const SB_URL = "https://www.fantasyinfocentral.com/betting/mlb/sb-predictions";
+// ── Date helpers (Mountain Time) ─────────────────────────────────────────────
+
+// Returns "YYYY-MM-DD" for today or tomorrow in America/Denver.
+function getMtDate(offsetDays = 0) {
+  const now = new Date();
+  // Shift by offset days in ms, then format in MT
+  const shifted = new Date(now.getTime() + offsetDays * 24 * 60 * 60 * 1000);
+  return shifted.toLocaleDateString("en-CA", { timeZone: "America/Denver" }); // en-CA gives YYYY-MM-DD
+}
+
+export function todayDate()    { return getMtDate(0); }
+export function tomorrowDate() { return getMtDate(1); }
+
+function buildUrl(base, date) {
+  return `${base}?date=${date}`;
+}
 
 // ── Browserless helper ───────────────────────────────────────────────────────
 
-async function fetchRenderedHtml(url, waitForSelector) {
+async function fetchRenderedHtml(url) {
   const response = await axios.post(
     `https://production-sfo.browserless.io/content?token=${BROWSERLESS_TOKEN}`,
     {
       url,
       bestAttempt: true,
       gotoOptions: { waitUntil: "networkidle2" },
-      waitForSelector: { selector: waitForSelector, timeout: 20000 },
+      waitForSelector: { selector: "table", timeout: 20000 },
       rejectResourceTypes: ["image", "font", "media"],
     },
     {
@@ -49,75 +67,13 @@ async function fetchRenderedHtml(url, waitForSelector) {
   return response.data;
 }
 
-// ── BVP scraper ──────────────────────────────────────────────────────────────
-// The page renders two tab panels: today and tomorrow.
-// We parse all <table> elements and pair them with their nearest heading/tab label.
-
-export async function scrapeBvpTables() {
-  const html = await fetchRenderedHtml(BVP_URL, "table");
-  const $ = cheerio.load(html);
-
-  // Collect tables with their preceding heading text
-  const results = { today: [], tomorrow: [] };
-
-  // The site uses tab panels or section headings to separate today/tomorrow.
-  // Strategy: walk all tables; use surrounding context to classify.
-  // Look for a parent element whose text contains "Today" or "Tomorrow".
-
-  $('table').each((_, tableEl) => {
-    const tableHtml = $.html(tableEl);
-    // Walk up the DOM to find a section label
-    let label = "today"; // default
-    let el = $(tableEl);
-    for (let i = 0; i < 10; i++) {
-      el = el.parent();
-      const parentText = el.attr('id') || el.attr('class') || "";
-      if (/tomorrow/i.test(parentText)) { label = "tomorrow"; break; }
-      if (/today/i.test(parentText)) { label = "today"; break; }
-      // Also check headings just before this ancestor
-      const prevHeading = el.prevAll('h1,h2,h3,h4,h5').first().text();
-      if (/tomorrow/i.test(prevHeading)) { label = "tomorrow"; break; }
-      if (/today/i.test(prevHeading)) { label = "today"; break; }
-    }
-    results[label].push(parseHtmlTable($, tableEl));
-  });
-
-  return results;
-}
-
-// ── SB scraper ───────────────────────────────────────────────────────────────
-
-export async function scrapeSbTables() {
-  const html = await fetchRenderedHtml(SB_URL, "table");
-  const $ = cheerio.load(html);
-
-  const results = { today: [], tomorrow: [] };
-
-  $('table').each((_, tableEl) => {
-    let label = "today";
-    let el = $(tableEl);
-    for (let i = 0; i < 10; i++) {
-      el = el.parent();
-      const parentText = el.attr('id') || el.attr('class') || "";
-      if (/tomorrow/i.test(parentText)) { label = "tomorrow"; break; }
-      if (/today/i.test(parentText)) { label = "today"; break; }
-      const prevHeading = el.prevAll('h1,h2,h3,h4,h5').first().text();
-      if (/tomorrow/i.test(prevHeading)) { label = "tomorrow"; break; }
-      if (/today/i.test(prevHeading)) { label = "today"; break; }
-    }
-    results[label].push(parseHtmlTable($, tableEl));
-  });
-
-  return results;
-}
-
-// ── Generic HTML table → row-array parser ───────────────────────────────────
+// ── Generic HTML table → row-array parser ────────────────────────────────────
 
 function parseHtmlTable($, tableEl) {
   const rows = [];
-  $(tableEl).find('tr').each((_, tr) => {
+  $(tableEl).find("tr").each((_, tr) => {
     const cells = [];
-    $(tr).find('th, td').each((_, cell) => {
+    $(tr).find("th, td").each((_, cell) => {
       cells.push($(cell).text().trim());
     });
     if (cells.length) rows.push(cells);
@@ -125,12 +81,23 @@ function parseHtmlTable($, tableEl) {
   return rows;
 }
 
-// ── Format rows as plain-text table ─────────────────────────────────────────
+// Scrape all tables from a fully-rendered URL
+async function scrapeTablesFromUrl(url) {
+  const html = await fetchRenderedHtml(url);
+  const $ = cheerio.load(html);
+  const tables = [];
+  $("table").each((_, tableEl) => {
+    const rows = parseHtmlTable($, tableEl);
+    if (rows.length > 1) tables.push(rows); // skip empty/single-row tables
+  });
+  return tables;
+}
+
+// ── Format rows as plain-text table ──────────────────────────────────────────
 
 function formatTableAsText(rows) {
   if (!rows || rows.length === 0) return "(no data)";
 
-  // Compute column widths
   const colCount = Math.max(...rows.map((r) => r.length));
   const widths = Array(colCount).fill(0);
   for (const row of rows) {
@@ -152,9 +119,9 @@ function formatTableAsText(rows) {
   return lines.join("\n");
 }
 
-// ── Format multiple tables into a markdown page ──────────────────────────────
+// ── Build Notion page markdown ────────────────────────────────────────────────
 
-function buildPageMarkdown(label, tables, sourceUrl) {
+function buildPageMarkdown(label, date, tables, sourceUrl) {
   const ts = new Date().toLocaleString("en-US", {
     timeZone: "America/Denver",
     year: "numeric", month: "2-digit", day: "2-digit",
@@ -163,7 +130,8 @@ function buildPageMarkdown(label, tables, sourceUrl) {
   });
 
   const lines = [
-    `${label}`,
+    label,
+    `Date: ${date}`,
     `Last synced: ${ts} MT`,
     `Source: ${sourceUrl}`,
     "",
@@ -182,41 +150,49 @@ function buildPageMarkdown(label, tables, sourceUrl) {
   return lines.join("\n");
 }
 
-// ── Public sync functions (called by index.js routes) ────────────────────────
+// ── Public sync functions ────────────────────────────────────────────────────
 
 export async function runBvpTodaySync() {
-  const { today } = await scrapeBvpTables();
-  const md = buildPageMarkdown("Batter vs Pitcher — Today", today, BVP_URL);
+  const date = todayDate();
+  const url  = buildUrl(BVP_BASE, date);
+  const tables = await scrapeTablesFromUrl(url);
+  const md = buildPageMarkdown("Batter vs Pitcher — Today", date, tables, url);
   await overwritePageWithMarkdown(FIC_BVP_TODAY_PAGE_ID, md);
-  await logRun({ name: `FIC BvP Today sync — ${new Date().toISOString()}` });
-  return { rows: today.reduce((s, t) => s + t.length, 0) };
+  await logRun({ name: `FIC BvP Today (${date}) — ${new Date().toISOString()}` });
+  return { date, tables: tables.length, rows: tables.reduce((s, t) => s + t.length, 0) };
 }
 
 export async function runBvpTomorrowSync() {
-  const { tomorrow } = await scrapeBvpTables();
-  const md = buildPageMarkdown("Batter vs Pitcher — Tomorrow", tomorrow, BVP_URL);
+  const date = tomorrowDate();
+  const url  = buildUrl(BVP_BASE, date);
+  const tables = await scrapeTablesFromUrl(url);
+  const md = buildPageMarkdown("Batter vs Pitcher — Tomorrow", date, tables, url);
   await overwritePageWithMarkdown(FIC_BVP_TOMORROW_PAGE_ID, md);
-  await logRun({ name: `FIC BvP Tomorrow sync — ${new Date().toISOString()}` });
-  return { rows: tomorrow.reduce((s, t) => s + t.length, 0) };
+  await logRun({ name: `FIC BvP Tomorrow (${date}) — ${new Date().toISOString()}` });
+  return { date, tables: tables.length, rows: tables.reduce((s, t) => s + t.length, 0) };
 }
 
 export async function runSbTodaySync() {
-  const { today } = await scrapeSbTables();
-  const md = buildPageMarkdown("Steal Probability — Today", today, SB_URL);
+  const date = todayDate();
+  const url  = buildUrl(SB_BASE, date);
+  const tables = await scrapeTablesFromUrl(url);
+  const md = buildPageMarkdown("Steal Probability — Today", date, tables, url);
   await overwritePageWithMarkdown(FIC_SB_TODAY_PAGE_ID, md);
-  await logRun({ name: `FIC SB Today sync — ${new Date().toISOString()}` });
-  return { rows: today.reduce((s, t) => s + t.length, 0) };
+  await logRun({ name: `FIC SB Today (${date}) — ${new Date().toISOString()}` });
+  return { date, tables: tables.length, rows: tables.reduce((s, t) => s + t.length, 0) };
 }
 
 export async function runSbTomorrowSync() {
-  const { tomorrow } = await scrapeSbTables();
-  const md = buildPageMarkdown("Steal Probability — Tomorrow", tomorrow, SB_URL);
+  const date = tomorrowDate();
+  const url  = buildUrl(SB_BASE, date);
+  const tables = await scrapeTablesFromUrl(url);
+  const md = buildPageMarkdown("Steal Probability — Tomorrow", date, tables, url);
   await overwritePageWithMarkdown(FIC_SB_TOMORROW_PAGE_ID, md);
-  await logRun({ name: `FIC SB Tomorrow sync — ${new Date().toISOString()}` });
-  return { rows: tomorrow.reduce((s, t) => s + t.length, 0) };
+  await logRun({ name: `FIC SB Tomorrow (${date}) — ${new Date().toISOString()}` });
+  return { date, tables: tables.length, rows: tables.reduce((s, t) => s + t.length, 0) };
 }
 
-// ── Combined helper: run all four at once ─────────────────────────────────────
+// ── Combined: all four at once ────────────────────────────────────────────────
 
 export async function runAllFicSyncs() {
   const [bvpToday, bvpTomorrow, sbToday, sbTomorrow] = await Promise.allSettled([
