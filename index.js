@@ -6,6 +6,13 @@ import { runSync } from "./sync.js";
 import { seasonStatsRouteHandler } from "./seasonstats.js";
 import { sevenDayStatsRouteHandler } from "./sevendaystats.js";
 import { runLineupSync, scrapeRotowireLineups, getRawHtml, getFirstCardHtml } from "./rotowire.js";
+import {
+  runBvpTodaySync,
+  runBvpTomorrowSync,
+  runSbTodaySync,
+  runSbTomorrowSync,
+  runAllFicSyncs,
+} from "./fantasyinfocentral.js";
 
 const app = express();
 
@@ -49,7 +56,7 @@ app.post("/sync", async (req, res) => {
 app.post("/sync/seasonstats", seasonStatsRouteHandler());
 app.post("/sync/sevendaystats", sevenDayStatsRouteHandler());
 
-// ── Rotowire MLB Lineups ────────────────────────────────────────────────────
+// ── Rotowire MLB Lineups ───────────────────────────────────────────────────────────────────
 app.post("/sync/lineups", async (req, res) => {
 	try {
 		const result = await runLineupSync();
@@ -77,13 +84,64 @@ app.get("/debug/lineups/raw", async (req, res) => {
 	}
 });
 
-// Dumps the raw HTML of the first game card so we can inspect player markup
 app.get("/debug/lineups/card", async (req, res) => {
 	try {
 		const card = await getFirstCardHtml();
 		res.type("text/plain").send(card);
 	} catch (e) {
 		res.status(500).send(String(e?.message || e));
+	}
+});
+
+// ── FantasyInfoCentral ───────────────────────────────────────────────────────────────────
+
+// Batter vs Pitcher — Today
+app.post("/sync/fic/bvp/today", async (req, res) => {
+	try {
+		const result = await runBvpTodaySync();
+		res.json({ ok: true, result });
+	} catch (e) {
+		res.status(500).json({ ok: false, error: String(e?.message || e) });
+	}
+});
+
+// Batter vs Pitcher — Tomorrow
+app.post("/sync/fic/bvp/tomorrow", async (req, res) => {
+	try {
+		const result = await runBvpTomorrowSync();
+		res.json({ ok: true, result });
+	} catch (e) {
+		res.status(500).json({ ok: false, error: String(e?.message || e) });
+	}
+});
+
+// Steal Probability — Today
+app.post("/sync/fic/sb/today", async (req, res) => {
+	try {
+		const result = await runSbTodaySync();
+		res.json({ ok: true, result });
+	} catch (e) {
+		res.status(500).json({ ok: false, error: String(e?.message || e) });
+	}
+});
+
+// Steal Probability — Tomorrow
+app.post("/sync/fic/sb/tomorrow", async (req, res) => {
+	try {
+		const result = await runSbTomorrowSync();
+		res.json({ ok: true, result });
+	} catch (e) {
+		res.status(500).json({ ok: false, error: String(e?.message || e) });
+	}
+});
+
+// All four FIC syncs at once (optional convenience route)
+app.post("/sync/fic/all", async (req, res) => {
+	try {
+		const result = await runAllFicSyncs();
+		res.json({ ok: true, result });
+	} catch (e) {
+		res.status(500).json({ ok: false, error: String(e?.message || e) });
 	}
 });
 

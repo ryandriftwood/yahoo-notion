@@ -20,12 +20,19 @@ export const NOTION_FREE_AGENTS_PAGE_ID = process.env.NOTION_FREE_AGENTS_PAGE_ID
 export const NOTION_SEASON_STATS_PAGE_ID = process.env.NOTION_SEASON_STATS_PAGE_ID;
 export const NOTION_SEVENDAY_STATS_PAGE_ID = process.env.NOTION_SEVENDAY_STATS_PAGE_ID;
 
-// ── Rotowire MLB Lineups ──────────────────────────────────────────────────────
+// ── Rotowire MLB Lineups ───────────────────────────────────────────────────────────────────
 export const ROTOWIRE_LINEUPS_URL = process.env.ROTOWIRE_LINEUPS_URL;
 export const NOTION_LINEUP_NEW_PAGE_ID = process.env.NOTION_LINEUP_NEW_PAGE_ID;
 export const NOTION_LINEUP_OLD_PAGE_ID = process.env.NOTION_LINEUP_OLD_PAGE_ID;
 export const NOTION_LINEUP_DB_ID = process.env.NOTION_LINEUP_DB_ID;
 export const BROWSERLESS_TOKEN = process.env.BROWSERLESS_TOKEN;
+
+// ── FantasyInfoCentral ───────────────────────────────────────────────────────────────────
+// Notion page IDs for the four FIC landing pages
+export const FIC_BVP_TODAY_PAGE_ID     = process.env.FIC_BVP_TODAY_PAGE_ID;
+export const FIC_BVP_TOMORROW_PAGE_ID  = process.env.FIC_BVP_TOMORROW_PAGE_ID;
+export const FIC_SB_TODAY_PAGE_ID      = process.env.FIC_SB_TODAY_PAGE_ID;
+export const FIC_SB_TOMORROW_PAGE_ID   = process.env.FIC_SB_TOMORROW_PAGE_ID;
 
 export function requireEnv(name, val) {
 	if (!val) throw new Error(`Missing env var ${name}`);
