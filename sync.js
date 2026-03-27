@@ -48,16 +48,16 @@ export async function runSync() {
     rosterResults.push(parsed);
   }
 
-  // 2) Free agents: top 300 hitters + top 200 pitchers by Yahoo rank
-  const hittersTarget = 300;
-  const pitchersTarget = 200;
+  // 2) Free agents: top 400 hitters + top 600 pitchers by Yahoo rank
+  const hittersTarget = 400;
+  const pitchersTarget = 600;
   const pageSize = 25; // Yahoo commonly caps here
 
   async function fetchFreeAgentsPage(position, start, count) {
     const xml = await yahooFantasyGetXml(
       `league/${YAHOO_LEAGUE_KEY}/players;status=A;position=${position};sort=OR;start=${start};count=${count}`
     );
-    // status=A -> available (FA + waivers), position=B/P filters hitters/pitchers, sort=OR -> overall rank [web:1][web:27]
+    // status=A -> available (FA + waivers), position=B/P filters hitters/pitchers, sort=OR -> overall rank
     return parseFreeAgents(xml);
   }
 
@@ -70,9 +70,21 @@ export async function runSync() {
       const count = Math.min(pageSize, remaining);
 
       const page = await fetchFreeAgentsPage(position, start, count);
-      if (!page.length) break;
+
+      // Pool exhausted: Yahoo returned nothing
+      if (!page.length) {
+        console.log(`[${position}] Pool exhausted at ${collected.length} players (empty page at start=${start}). Moving on.`);
+        break;
+      }
 
       collected = collected.concat(page);
+
+      // Pool exhausted: Yahoo returned fewer than requested — this is the last page
+      if (page.length < count) {
+        console.log(`[${position}] Pool exhausted at ${collected.length} players (partial page: got ${page.length}/${count}). Moving on.`);
+        break;
+      }
+
       start += pageSize;
     }
 
@@ -80,11 +92,14 @@ export async function runSync() {
   }
 
   const hitters = await fetchTopForPosition("B", hittersTarget);
-  const pitchers = await fetchTopForPosition("P", pitchersTarget);
+  console.log(`Hitters collected: ${hitters.length}`);
 
-  // Combined list: 300 hitters + 200 pitchers
+  const pitchers = await fetchTopForPosition("P", pitchersTarget);
+  console.log(`Pitchers collected: ${pitchers.length}`);
+
+  // Combined list: hitters first, then pitchers
   const freeAgents = [...hitters, ...pitchers];
-  const target = freeAgents.length;
+  const total = freeAgents.length;
 
   // 3) Write to Notion (true overwrite)
   const rostersMd =
@@ -101,17 +116,19 @@ export async function runSync() {
 
   await overwritePageWithNumberedList(
     NOTION_FREE_AGENTS_PAGE_ID,
-    [`Free agents (Top ${target} by Yahoo rank)`, `Last synced: ${started}`],
+    [`Free agents (${hitters.length} hitters + ${pitchers.length} pitchers = ${total} total)`, `Last synced: ${started}`],
     freeAgents
   );
 
   await logRun({
-    name: `Sync run ${started} (teams=${rosterResults.length}, freeAgents=${freeAgents.length})`,
+    name: `Sync run ${started} (teams=${rosterResults.length}, freeAgents=${total})`,
   });
 
   return {
     started,
     teams: rosterResults.length,
-    freeAgents: freeAgents.length,
+    hitters: hitters.length,
+    pitchers: pitchers.length,
+    freeAgents: total,
   };
 }
