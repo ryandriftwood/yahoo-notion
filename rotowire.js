@@ -269,15 +269,11 @@ async function overwritePageWithMarkdown(pageId, markdown) {
   }
 }
 
-async function logLineupRun({ label, gamesCount, changesDetected }) {
-  const ts = new Date().toLocaleString("en-US", { timeZone: "America/Denver", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+async function logLineupRun(label) {
   await notion.pages.create({
     parent: { database_id: NOTION_LINEUP_DB_ID },
     properties: {
       Name: { title: [{ type: "text", text: { content: label } }] },
-      "Scraped At": { rich_text: [{ type: "text", text: { content: ts } }] },
-      Games: { number: gamesCount },
-      "Changes Detected": { checkbox: changesDetected },
     },
   });
 }
@@ -330,7 +326,7 @@ export async function runLineupSync() {
   await overwritePageWithMarkdown(NOTION_LINEUP_NEW_PAGE_ID, formatSnapshot(newSnapshot));
 
   const ts = new Date(newSnapshot.scrapedAt).toLocaleString("en-US", { timeZone: "America/Denver", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
-  await logLineupRun({ label: `Lineup update ${ts}`, gamesCount: newSnapshot.games.length, changesDetected: true });
+  await logLineupRun(`Lineup update ${ts}`);
 
   try {
     await saveSnapshot(newSnapshot);
