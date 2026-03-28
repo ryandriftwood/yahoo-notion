@@ -27,6 +27,9 @@ export const NOTION_LINEUP_OLD_PAGE_ID = process.env.NOTION_LINEUP_OLD_PAGE_ID;
 export const NOTION_LINEUP_DB_ID = process.env.NOTION_LINEUP_DB_ID;
 export const BROWSERLESS_TOKEN = process.env.BROWSERLESS_TOKEN;
 
+// ── Rotowire Projected Lineups (tomorrow) ─────────────────────────────────────────────────
+export const NOTION_PROJECTED_LINEUP_PAGE_ID = process.env.NOTION_PROJECTED_LINEUP_PAGE_ID;
+
 // ── FantasyInfoCentral ───────────────────────────────────────────────────────────────────
 // Notion page IDs for the four FIC landing pages
 export const FIC_BVP_TODAY_PAGE_ID     = process.env.FIC_BVP_TODAY_PAGE_ID;
