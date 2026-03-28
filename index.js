@@ -6,6 +6,7 @@ import { runSync } from "./sync.js";
 import { seasonStatsRouteHandler } from "./seasonstats.js";
 import { sevenDayStatsRouteHandler } from "./sevendaystats.js";
 import { runLineupSync, scrapeRotowireLineups, getRawHtml, getFirstCardHtml } from "./rotowire.js";
+import { runProjectedLineupSync } from "./rotowire-projected.js";
 import {
   runBvpTodaySync,
   runBvpTomorrowSync,
@@ -60,6 +61,15 @@ app.post("/sync/sevendaystats", sevenDayStatsRouteHandler());
 app.post("/sync/lineups", async (req, res) => {
 	try {
 		const result = await runLineupSync();
+		res.json({ ok: true, result });
+	} catch (e) {
+		res.status(500).json({ ok: false, error: String(e?.response?.data || e?.message || e) });
+	}
+});
+
+app.post("/sync/rotowire-projected", async (req, res) => {
+	try {
+		const result = await runProjectedLineupSync();
 		res.json({ ok: true, result });
 	} catch (e) {
 		res.status(500).json({ ok: false, error: String(e?.response?.data || e?.message || e) });
