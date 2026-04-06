@@ -36,13 +36,6 @@ function teamKeys() {
 
 // ---------------------------------------------------------------------------
 // NAME NORMALIZATION + MAP LOOKUPS
-// Identical to rotowire-projected.js so BVP/SB keys match.
-//
-// FIC stores player names in abbreviated form: "M. Betts"
-// normalizeName("M. Betts") => "m betts"
-// Roster full names: normalizeName("Mookie Betts") => "mookie betts"
-// initialLastKey("mookie betts") => "m betts"  ← matches FIC key
-// So lookupMap always tries full key first, then initial+last fallback.
 // ---------------------------------------------------------------------------
 
 function normalizeName(name) {
@@ -61,14 +54,11 @@ function initialLastKey(n) {
   return `${parts[0][0]} ${parts.slice(1).join(" ")}`;
 }
 
-// Try full normalized name first, then initial+last abbreviation fallback.
-// e.g. lookupMap(map, "mookie betts") tries "mookie betts", then "m betts"
 function lookupMap(map, key) {
   if (map[key] !== undefined) return map[key];
   return map[initialLastKey(key)];
 }
 
-// SB% map may use team-prefixed keys; fall back to name-only.
 function lookupMapWithTeam(map, key, team) {
   if (team) {
     const t = team.toLowerCase();
@@ -88,8 +78,7 @@ async function parseXml(xml) {
 }
 
 // ---------------------------------------------------------------------------
-// FLEXIBLE COLUMN FINDER
-// Ported from fantasyinfocentral.js — handles raw FIC header variants.
+// FLEXIBLE COLUMN FINDER — handles raw FIC header variants
 // ---------------------------------------------------------------------------
 
 function findCol(header, matchers) {
@@ -137,14 +126,6 @@ async function readNotionTableRows(pageId) {
 
 // ---------------------------------------------------------------------------
 // BVP MAP — today's matchups (FIC_BVP_TODAY_PAGE_ID)
-//
-// Today's page is written by writeRawTablePageToNotion (raw FIC scrape),
-// so headers are whatever FIC uses natively — NOT the fixed normalized schema.
-// We use findCol() with flexible matchers, same as fantasyinfocentral.js does
-// when normalizing tomorrow's data.
-//
-// Player keys stored as normalizeName(rawFicName), e.g. "m betts".
-// lookupMap() matches these via initialLastKey fallback on roster full names.
 // ---------------------------------------------------------------------------
 
 async function fetchBvpMap() {
@@ -155,7 +136,6 @@ async function fetchBvpMap() {
   const header = rows[0].map((x) => x.trim());
   console.log("[sync] BVP raw headers:", header);
 
-  // Flexible column matching — mirrors fantasyinfocentral.js normalizeBvpTables()
   const iName = findCol(header, [
     "batter", "player", "hitter", "name",
     (h) => h.startsWith("batter") || h.startsWith("player") || h.startsWith("hitter"),
@@ -173,7 +153,7 @@ async function fetchBvpMap() {
   for (const row of rows.slice(1)) {
     const rawName = row[iName]?.trim();
     if (!rawName) continue;
-    const key = normalizeName(rawName);  // e.g. "m betts" — matches via initialLastKey fallback
+    const key = normalizeName(rawName);
     if (!key) continue;
     map[key] = {
       ab:    iAb  >= 0 ? (row[iAb]  || "") : "",
@@ -188,8 +168,6 @@ async function fetchBvpMap() {
 
 // ---------------------------------------------------------------------------
 // SB MAP — today's matchups (FIC_SB_TODAY_PAGE_ID)
-//
-// Same situation as BVP: raw FIC headers, flexible column matching.
 // ---------------------------------------------------------------------------
 
 async function fetchSbMap() {
@@ -200,7 +178,6 @@ async function fetchSbMap() {
   const header = rows[0].map((x) => x.trim());
   console.log("[sync] SB raw headers:", header);
 
-  // Flexible column matching — mirrors fantasyinfocentral.js normalizeSbTables()
   const iName = findCol(header, [
     "player", "batter", "hitter", "name", "runner",
     (h) => h.startsWith("player") || h.startsWith("batter") || h.startsWith("hitter"),
@@ -219,7 +196,7 @@ async function fetchSbMap() {
   for (const row of rows.slice(1)) {
     const rawName = row[iName]?.trim();
     if (!rawName) continue;
-    const key = normalizeName(rawName);  // e.g. "m betts"
+    const key = normalizeName(rawName);
     if (!key) continue;
     map[key] = row[iSb] || "";
   }
@@ -229,23 +206,31 @@ async function fetchSbMap() {
 
 // ---------------------------------------------------------------------------
 // YAHOO: 7-DAY OPS  (stat ID 55, type=lastweek)
-// Rolling last-7-days OPS — different from season OPS below
+// Guards against empty playerKeys and wraps each batch in try/catch so a
+// single bad Yahoo response (rate limit, non-XML body) skips that batch
+// rather than crashing the entire sync run.
 // ---------------------------------------------------------------------------
 
 async function fetch7DayOpsMap(playerKeys) {
   const map = {};
+  if (!playerKeys.length) { console.warn("[sync] 7-day OPS: no player keys — skipping."); return map; }
   for (let i = 0; i < playerKeys.length; i += 25) {
-    const csv = playerKeys.slice(i, i + 25).join(",");
-    const xml = await yahooFantasyGetXml(
-      `league/${YAHOO_LEAGUE_KEY}/players;player_keys=${csv}/stats;type=lastweek`
-    );
-    const parsed = await parseXml(xml);
-    for (const pl of asArray(parsed?.fantasy_content?.league?.players?.player)) {
-      const full = pl?.name?.full || "";
-      if (!full) continue;
-      for (const s of asArray(pl?.player_stats?.stats?.stat)) {
-        if (String(s?.stat_id) === "55") { map[normalizeName(full)] = s?.value ?? ""; break; }
+    const batch = playerKeys.slice(i, i + 25);
+    const csv = batch.join(",");
+    try {
+      const xml = await yahooFantasyGetXml(
+        `league/${YAHOO_LEAGUE_KEY}/players;player_keys=${csv}/stats;type=lastweek`
+      );
+      const parsed = await parseXml(xml);
+      for (const pl of asArray(parsed?.fantasy_content?.league?.players?.player)) {
+        const full = pl?.name?.full || "";
+        if (!full) continue;
+        for (const s of asArray(pl?.player_stats?.stats?.stat)) {
+          if (String(s?.stat_id) === "55") { map[normalizeName(full)] = s?.value ?? ""; break; }
+        }
       }
+    } catch (e) {
+      console.error(`[sync] 7-day OPS batch ${i}-${i + batch.length} failed:`, e.message);
     }
   }
   console.log(`[sync] 7-day OPS map: ${Object.keys(map).length} players`);
@@ -253,24 +238,30 @@ async function fetch7DayOpsMap(playerKeys) {
 }
 
 // ---------------------------------------------------------------------------
-// YAHOO: SEASON OPS  (stat ID 55, no type param = season-to-date default)
-// Full season accumulation — different from 7-day OPS above
+// YAHOO: SEASON OPS  (stat ID 55, no type param = season-to-date)
+// Same guards as 7-day OPS above.
 // ---------------------------------------------------------------------------
 
 async function fetchSeasonOpsMap(playerKeys) {
   const map = {};
+  if (!playerKeys.length) { console.warn("[sync] Season OPS: no player keys — skipping."); return map; }
   for (let i = 0; i < playerKeys.length; i += 25) {
-    const csv = playerKeys.slice(i, i + 25).join(",");
-    const xml = await yahooFantasyGetXml(
-      `league/${YAHOO_LEAGUE_KEY}/players;player_keys=${csv}/stats`
-    );
-    const parsed = await parseXml(xml);
-    for (const pl of asArray(parsed?.fantasy_content?.league?.players?.player)) {
-      const full = pl?.name?.full || "";
-      if (!full) continue;
-      for (const s of asArray(pl?.player_stats?.stats?.stat)) {
-        if (String(s?.stat_id) === "55") { map[normalizeName(full)] = s?.value ?? ""; break; }
+    const batch = playerKeys.slice(i, i + 25);
+    const csv = batch.join(",");
+    try {
+      const xml = await yahooFantasyGetXml(
+        `league/${YAHOO_LEAGUE_KEY}/players;player_keys=${csv}/stats`
+      );
+      const parsed = await parseXml(xml);
+      for (const pl of asArray(parsed?.fantasy_content?.league?.players?.player)) {
+        const full = pl?.name?.full || "";
+        if (!full) continue;
+        for (const s of asArray(pl?.player_stats?.stats?.stat)) {
+          if (String(s?.stat_id) === "55") { map[normalizeName(full)] = s?.value ?? ""; break; }
+        }
       }
+    } catch (e) {
+      console.error(`[sync] Season OPS batch ${i}-${i + batch.length} failed:`, e.message);
     }
   }
   console.log(`[sync] Season OPS map: ${Object.keys(map).length} players`);
@@ -279,8 +270,6 @@ async function fetchSeasonOpsMap(playerKeys) {
 
 // ---------------------------------------------------------------------------
 // FORMAT ENRICHED PLAYER LINE
-// Input string format from parseTeamRoster: "Name — POS (ELIG) — TEAM"
-// Enrichment appended in brackets.
 // ---------------------------------------------------------------------------
 
 function formatEnrichedPlayerLine(playerStr, ops7day, opsSeason, bvp, sbPct) {
@@ -299,11 +288,10 @@ function formatEnrichedPlayerLine(playerStr, ops7day, opsSeason, bvp, sbPct) {
 }
 
 // ---------------------------------------------------------------------------
-// MAIN ENTRY POINT  (original structure preserved exactly)
+// MAIN ENTRY POINT
 // ---------------------------------------------------------------------------
 
 export async function runSync() {
-  // Mountain Time (America/Denver), human readable
   const started = new Date().toLocaleString("en-US", {
     timeZone: "America/Denver",
     year: "numeric",
@@ -315,11 +303,10 @@ export async function runSync() {
     hour12: false,
   });
 
-  // 1) Rosters (10 teams) — identical to original
-  //    Also collect player_key + mlbTeam in the same loop for stat lookups.
+  // 1) Rosters — collect player display strings + player_key + mlbTeam
   const rosterResults = [];
-  const rosterPlayerKeys = [];  // [player_key string, ...]
-  const rosterPlayerTeam = {};  // normalizedName → mlbTeam
+  const rosterPlayerKeys = [];
+  const rosterPlayerTeam = {};
   const seenKeys = new Set();
 
   for (const tk of teamKeys()) {
@@ -327,9 +314,16 @@ export async function runSync() {
     const parsed = await parseTeamRoster(xml);
     rosterResults.push(parsed);
 
-    // Re-parse the same XML to extract player_key + mlbTeam (no extra fetch)
+    // Re-parse same XML to pull player_key + mlbTeam without an extra fetch.
+    // Yahoo wraps fantasy_content.team as an array when mergeAttrs is used,
+    // so walk it safely with asArray().
     const rawParsed = await parseXml(xml);
-    const players = asArray(rawParsed?.fantasy_content?.team?.roster?.players?.player);
+    const teamNode = rawParsed?.fantasy_content?.team;
+    // teamNode may be an object or an array depending on Yahoo's XML shape
+    const teamObj = Array.isArray(teamNode)
+      ? teamNode.find((t) => t?.roster)  // find the element that has roster
+      : teamNode;
+    const players = asArray(teamObj?.roster?.players?.player);
     for (const pl of players) {
       const key = pl?.player_key || null;
       if (!key || seenKeys.has(key)) continue;
@@ -340,7 +334,9 @@ export async function runSync() {
     }
   }
 
-  // 2) Fetch all enrichment data in parallel — graceful fallback to {} on any failure
+  console.log(`[sync] Roster player keys collected: ${rosterPlayerKeys.length}`);
+
+  // 2) Fetch enrichment data in parallel — each fetch is fully fault-tolerant
   console.log("[sync] Fetching 7-day OPS, season OPS, BVP, SB% in parallel...");
   const [ops7DayMap, opsSeasonMap, bvpMap, sbMap] = await Promise.all([
     fetch7DayOpsMap(rosterPlayerKeys).catch((e) => { console.error("[sync] 7-day OPS failed:", e.message); return {}; }),
@@ -349,7 +345,7 @@ export async function runSync() {
     fetchSbMap().catch((e) => { console.error("[sync] SB% failed:", e.message); return {}; }),
   ]);
 
-  // 3) Free agents — identical to original
+  // 3) Free agents — unchanged from original
   const hittersTarget = 400;
   const pitchersTarget = 600;
   const pageSize = 25;
@@ -391,10 +387,7 @@ export async function runSync() {
   const freeAgents = [...hitters, ...pitchers];
   const total = freeAgents.length;
 
-  // 4) Build enriched roster markdown + write to Notion
-  //
-  // Player strings from parseTeamRoster: "Mookie Betts — OF (OF, 1B) — LAD"
-  // Name extracted by splitting on em-dash; mlbTeam from rosterPlayerTeam map.
+  // 4) Write enriched rosters + free agents to Notion
   const legend = "Legend: 7-day OPS = last 7 days | Season OPS = season to date | BVP = vs today's pitcher (#AB, QAB%, HH%, HRF) | SB% = steal probability";
 
   const rostersMd =
@@ -403,7 +396,7 @@ export async function runSync() {
       .map((t) => {
         const header = `${t.team_name || t.team_key}`;
         const lines = (t.players || []).map((p) => {
-          const nameOnly = p.split(" \u2014 ")[0].trim();  // split on em-dash "\u2014"
+          const nameOnly = p.split(" \u2014 ")[0].trim();
           const key = normalizeName(nameOnly);
           const mlbTeam  = rosterPlayerTeam[key] || "";
           const ops7day  = lookupMap(ops7DayMap, key) || "";
