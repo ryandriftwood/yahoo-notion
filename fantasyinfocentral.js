@@ -6,6 +6,10 @@
 // so that rotowire-projected.js can do exact header matching:
 //   BVP:  Player | #AB | QAB% | HH% | HRF
 //   SB:   Player | SB%
+//
+// Player keys are stored as "team:normalizedname" (e.g. "bos:m betts") so that
+// rotowire-projected.js can disambiguate players with the same first-initial + last name
+// on different teams.  The team prefix comes from the first 3 chars of the Game column.
 
 import axios from "axios";
 import * as cheerio from "cheerio";
@@ -34,6 +38,7 @@ const SB_BASE  = "https://www.fantasyinfocentral.com/betting/mlb/sb-predictions"
 
 // ── Fixed output schemas ──────────────────────────────────────────────────────
 // These are the EXACT headers rotowire-projected.js expects to find.
+// Player values are stored as "team:normalizedname" (e.g. "bos:m betts").
 const BVP_COLUMNS = ["Player", "#AB", "QAB%", "HH%", "HRF"];
 const SB_COLUMNS  = ["Player", "SB%"];
 
@@ -63,6 +68,18 @@ function normalizeName(name) {
     .replace(/[^a-z ]/g, "")          // strip punctuation, Jr., etc.
     .replace(/\s+/g, " ")
     .trim();
+}
+
+// ── Team key helper ───────────────────────────────────────────────────────────
+// Extracts the batter's team abbreviation from the Game column value.
+// FIC Game column format: "BOS@NYY", "LAD@SD", etc.
+// The first 3 characters are the away team (batter's team for away batters),
+// but since all batters in a given row belong to the team listed first in their
+// game entry, we just take the first 3 chars and lowercase them.
+
+function teamFromGame(gameCell) {
+  if (!gameCell) return "";
+  return gameCell.trim().slice(0, 3).toLowerCase();
 }
 
 // ── Browserless helper ───────────────────────────────────────────────────────
@@ -126,6 +143,8 @@ function findCol(header, matchers) {
 // ── BVP normalizer ────────────────────────────────────────────────────────────
 // Takes raw scraped tables (any schema, any number of tables) and produces
 // a single clean array of rows matching BVP_COLUMNS exactly.
+// Player key format: "team:normalizedname" (e.g. "bos:m betts")
+// Falls back to normalizedname alone if no Game column is found.
 
 function normalizeBvpTables(tables) {
   const seen = new Set();
@@ -136,7 +155,7 @@ function normalizeBvpTables(tables) {
     const rawHeader = table[0];
     const header = rawHeader.map((h) => h.toLowerCase().trim());
 
-    // Find player name column
+    // Find player name column (batter)
     const iName = findCol(header, [
       "batter", "player", "hitter", "name",
       (h) => h.startsWith("batter") || h.startsWith("player") || h.startsWith("hitter"),
@@ -146,27 +165,37 @@ function normalizeBvpTables(tables) {
       continue;
     }
 
+    // Find Game column — first 3 chars are the batter's team abbreviation
+    const iGame = findCol(header, [
+      "game", "matchup", "match",
+      (h) => h.startsWith("game") || h.startsWith("matchup"),
+    ]);
+
     // Find stat columns
     const iAb  = findCol(header, ["#ab", "ab#", "ab", "at bats", "atbats", (h) => h === "ab"]);
     const iQab = findCol(header, ["qab%", "qab #", "qab", (h) => h.startsWith("qab")]);
     const iHh  = findCol(header, ["hh%", "hh", "hard hit%", "hard hit", (h) => h.includes("hh") || h.includes("hard hit")]);
     const iHrf = findCol(header, ["hrf", "hr/f", "hr f", "hrfb", "hr f%", (h) => h.startsWith("hrf") || h.startsWith("hr/f") || h.startsWith("hr f")]);
 
-    console.log(`[fic] BVP table (${table.length - 1} data rows): name:${iName} ab:${iAb} qab:${iQab} hh:${iHh} hrf:${iHrf}`);
+    console.log(`[fic] BVP table (${table.length - 1} data rows): name:${iName} game:${iGame} ab:${iAb} qab:${iQab} hh:${iHh} hrf:${iHrf}`);
 
     for (const row of table.slice(1)) {
       const rawName = row[iName] || "";
       if (!rawName) continue;
 
-      // Normalize the name for dedup and for rotowire matching
       const normalized = normalizeName(rawName);
-      if (!normalized || seen.has(normalized)) continue;
-      seen.add(normalized);
+      if (!normalized) continue;
 
-      // Use normalized name as the stored value so rotowire-projected.js
-      // can match it directly without re-normalizing the Notion cell.
+      // Build team-qualified key: "team:normalizedname"
+      // Falls back to normalizedname alone if no game cell available
+      const team = iGame >= 0 ? teamFromGame(row[iGame]) : "";
+      const playerKey = team ? `${team}:${normalized}` : normalized;
+
+      if (seen.has(playerKey)) continue;
+      seen.add(playerKey);
+
       out.push([
-        normalized,
+        playerKey,
         iAb  >= 0 ? (row[iAb]  || "") : "",
         iQab >= 0 ? (row[iQab] || "") : "",
         iHh  >= 0 ? (row[iHh]  || "") : "",
@@ -182,6 +211,7 @@ function normalizeBvpTables(tables) {
 // ── SB normalizer ─────────────────────────────────────────────────────────────
 // Takes raw scraped tables and produces a single clean array of rows matching
 // SB_COLUMNS exactly.
+// Player key format: "team:normalizedname" (e.g. "bos:m betts")
 
 function normalizeSbTables(tables) {
   const seen = new Set();
@@ -201,6 +231,12 @@ function normalizeSbTables(tables) {
       continue;
     }
 
+    // Find Game column — first 3 chars are the batter's team abbreviation
+    const iGame = findCol(header, [
+      "game", "matchup", "match",
+      (h) => h.startsWith("game") || h.startsWith("matchup"),
+    ]);
+
     const iSb = findCol(header, [
       "sb%", "steal%", "sb probability", "steal probability",
       (h) => h.includes("sb") || h.includes("steal") || h.includes("prob"),
@@ -210,18 +246,23 @@ function normalizeSbTables(tables) {
       continue;
     }
 
-    console.log(`[fic] SB table (${table.length - 1} data rows): name:${iName} sb:${iSb}`);
+    console.log(`[fic] SB table (${table.length - 1} data rows): name:${iName} game:${iGame} sb:${iSb}`);
 
     for (const row of table.slice(1)) {
       const rawName = row[iName] || "";
       if (!rawName) continue;
 
       const normalized = normalizeName(rawName);
-      if (!normalized || seen.has(normalized)) continue;
-      seen.add(normalized);
+      if (!normalized) continue;
+
+      const team = iGame >= 0 ? teamFromGame(row[iGame]) : "";
+      const playerKey = team ? `${team}:${normalized}` : normalized;
+
+      if (seen.has(playerKey)) continue;
+      seen.add(playerKey);
 
       out.push([
-        normalized,
+        playerKey,
         iSb >= 0 ? (row[iSb] || "") : "",
       ]);
     }
