@@ -10,9 +10,9 @@
 //   BVP:  Player | #AB | QAB% | HH% | HRF
 //   SB:   Player | SB%
 //
-// FIC stores names as abbreviated "first-initial last" (e.g. "m betts").
-// Rotowire and Yahoo use full names (e.g. "mookie betts").
-// lookupPlayer() tries full-name first, then falls back to "{initial} {lastName}".
+// FIC stores player keys as "team:normalizedname" (e.g. "bos:m betts").
+// lookupMapWithTeam() tries "team:initial last" first, then "team:full name",
+// then falls back to name-only variants for backward compatibility.
 
 import axios from "axios";
 import { Client as NotionClient } from "@notionhq/client";
@@ -64,13 +64,13 @@ function normalizeName(name) {
 
 function initialLastKey(normalizedFullName) {
   const parts = normalizedFullName.split(" ");
-  if (parts.length < 2) return normalizedFullName; // single-word name, use as-is
+  if (parts.length < 2) return normalizedFullName;
   return `${parts[0][0]} ${parts.slice(1).join(" ")}`;
 }
 
 // ---------------------------------------------------------------------------
-// MAP LOOKUP — full name first, then initial+last fallback
-// Works for any map keyed by normalized name (BVP, SB, OPS, FA).
+// MAP LOOKUP — name-only (FA set, OPS map)
+// Full name first, then initial+last fallback.
 // ---------------------------------------------------------------------------
 
 function lookupMap(map, normalizedFullName) {
@@ -82,6 +82,27 @@ function lookupMap(map, normalizedFullName) {
 function hasInSet(set, normalizedFullName) {
   if (set.has(normalizedFullName)) return true;
   return set.has(initialLastKey(normalizedFullName));
+}
+
+// ---------------------------------------------------------------------------
+// TEAM-QUALIFIED MAP LOOKUP — BVP + SB maps
+// FIC keys are stored as "team:normalizedname" (e.g. "bos:m betts").
+// Try order:
+//   1. "team:initial last"   ← most likely FIC format
+//   2. "team:full name"      ← in case FIC stored full name
+//   3. name-only fallback    ← backward compat / missing game column
+// ---------------------------------------------------------------------------
+
+function lookupMapWithTeam(map, normalizedFullName, team) {
+  if (team) {
+    const t = team.toLowerCase();
+    const abbrKey = `${t}:${initialLastKey(normalizedFullName)}`;
+    if (map[abbrKey] !== undefined) return map[abbrKey];
+    const fullKey = `${t}:${normalizedFullName}`;
+    if (map[fullKey] !== undefined) return map[fullKey];
+  }
+  // Fall back to name-only for backward compat / missing team data
+  return lookupMap(map, normalizedFullName);
 }
 
 // ---------------------------------------------------------------------------
@@ -156,7 +177,7 @@ async function readNotionTableRows(pageId) {
 // ---------------------------------------------------------------------------
 // BVP MAP
 // Fixed schema: Player | #AB | QAB% | HH% | HRF
-// Keys are normalized abbreviated names ("m betts") written by fantasyinfocentral.js.
+// Keys are "team:normalizedname" (e.g. "bos:m betts") written by fantasyinfocentral.js.
 // ---------------------------------------------------------------------------
 
 async function fetchBvpMapFromNotion() {
@@ -201,6 +222,7 @@ async function fetchBvpMapFromNotion() {
 // ---------------------------------------------------------------------------
 // SB MAP
 // Fixed schema: Player | SB%
+// Keys are "team:normalizedname" (e.g. "bos:m betts") written by fantasyinfocentral.js.
 // ---------------------------------------------------------------------------
 
 async function fetchSbMapFromNotion() {
@@ -435,12 +457,13 @@ async function scrapeTomorrowLineups() {
 
 // ---------------------------------------------------------------------------
 // ENRICH PLAYERS
-// Uses lookupMap / hasInSet which try full name first, then "{initial} {last}".
+// team is the 3-letter Rotowire abbreviation (e.g. "BOS", "NYY").
+// lookupMapWithTeam tries team-qualified keys first, falls back to name-only.
 // ---------------------------------------------------------------------------
 
-function enrichPlayer(player, faSet, opsMap, bvpMap, sbMap) {
+function enrichPlayer(player, team, faSet, opsMap, bvpMap, sbMap) {
   const key = normalizeName(player.name);
-  const bvp = lookupMap(bvpMap, key) || null;
+  const bvp = lookupMapWithTeam(bvpMap, key, team) || null;
   return {
     ...player,
     isFreeAgent: hasInSet(faSet, key),
@@ -449,7 +472,7 @@ function enrichPlayer(player, faSet, opsMap, bvpMap, sbMap) {
     bvpQab: bvp?.qab   ?? "",
     bvpHh:  bvp?.hhPct ?? "",
     bvpHrf: bvp?.hrf   ?? "",
-    sbPct:  lookupMap(sbMap, key) ?? "",
+    sbPct:  lookupMapWithTeam(sbMap, key, team) ?? "",
   };
 }
 
@@ -619,13 +642,13 @@ export async function runProjectedLineupSync() {
     }),
   ]);
 
-  // 3) Enrich each batter in every lineup
+  // 3) Enrich each batter in every lineup, passing the team abbreviation
   for (const game of snapshot.games) {
     game.awayLineup.players = game.awayLineup.players.map((p) =>
-      enrichPlayer(p, faSet, opsMap, bvpMap, sbMap)
+      enrichPlayer(p, game.awayTeam, faSet, opsMap, bvpMap, sbMap)
     );
     game.homeLineup.players = game.homeLineup.players.map((p) =>
-      enrichPlayer(p, faSet, opsMap, bvpMap, sbMap)
+      enrichPlayer(p, game.homeTeam, faSet, opsMap, bvpMap, sbMap)
     );
   }
 
