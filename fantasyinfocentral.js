@@ -7,14 +7,13 @@
 //   BVP:  Player | #AB | QAB% | HH% | HRF
 //   SB:   Player | SB%
 //
-// Player keys are stored as BOTH "awayteam:normalizedname" AND "hometeam:normalizedname"
-// (e.g. "lan:m betts" and "nyy:m betts") so that rotowire-projected.js can match
-// regardless of which side of the @ the batter is on.
-// A name-only key is also stored as a final fallback.
+// Player keys are stored as name-only (e.g. "m betts") — FIC game cells give the
+// matchup (BOS @ NYY) but not which side the batter plays for, so team-prefixed
+// keys were unreliable. Name-only keys are unambiguous in practice and match how
+// rotowire-projected.js already falls back.
 //
 // FIC player cells contain the name followed by position/hand/injury in sibling spans.
 // playerNameFromCell() extracts only the name (first <a> or first text node).
-// FIC game cells use <img> tags for team logos; cellText() reads img alt/src.
 
 import axios from "axios";
 import * as cheerio from "cheerio";
@@ -72,17 +71,6 @@ function normalizeName(name) {
     .trim();
 }
 
-// ── Team key helper ───────────────────────────────────────────────────────────
-// Splits a game cell string on @ and returns both team abbrevs (2-3 alpha chars each).
-
-function teamsFromGame(gameCell) {
-  if (!gameCell) return [];
-  const parts = gameCell.trim().split("@").map((p) => p.trim().toLowerCase());
-  return parts
-    .map((p) => p.replace(/[^a-z]/g, "").slice(0, 3))
-    .filter((p) => p.length >= 2);
-}
-
 // ── Player name extractor ────────────────────────────────────────────────────
 // FIC player cells look like:
 //   <td><a href="...">M. Betts</a><span>SS</span><span>R</span><span>IL</span></td>
@@ -90,16 +78,14 @@ function teamsFromGame(gameCell) {
 // Strategy: take the text of the first <a> if present, else the first non-empty text node.
 
 function playerNameFromCell($, cellEl) {
-  // Prefer the first anchor's text (most reliable — FIC links player names)
   const firstA = $(cellEl).find("a").first();
   if (firstA.length) {
     const t = firstA.text().trim();
     if (t) return t;
   }
-  // Fall back to first non-empty text node in the cell
   let name = "";
   $(cellEl).contents().each((_, node) => {
-    if (name) return false; // stop once found
+    if (name) return false;
     if (node.type === "text") {
       const t = (node.data || "").trim();
       if (t) name = t;
@@ -112,6 +98,7 @@ function playerNameFromCell($, cellEl) {
 // FIC game cells use <img> tags for team logos. cheerio .text() returns only "@ ".
 // This walks child nodes and collects img alt (preferred) or src filename stem
 // alongside literal text, producing e.g. "BOS @ NYY".
+// Kept for raw today-page scraping (writeRawTablePageToNotion).
 
 function cellText($, cellEl) {
   const parts = [];
@@ -159,7 +146,6 @@ async function fetchRenderedHtml(url) {
 
 // ── HTML table → row-array parser ──────────────────────────────────────────────
 // Uses cellText() for all cells so img alt/src values are captured.
-// Player name cleaning happens later in the normalizers via playerNameFromCell().
 
 function parseHtmlTable($, tableEl) {
   const rows = [];
@@ -175,8 +161,7 @@ function parseHtmlTable($, tableEl) {
 
 // ── Rich table parser — for normalizers that need per-cell cheerio access ────────
 // Returns rows as arrays of cheerio cell elements (not text strings),
-// so normalizers can call playerNameFromCell() on the name column
-// and cellText() on the game column independently.
+// so normalizers can call playerNameFromCell() on the name column.
 
 function parseHtmlTableRich($, tableEl) {
   const rows = [];
@@ -194,7 +179,6 @@ async function scrapeTablesFromUrl(url) {
   const html = await fetchRenderedHtml(url);
   const $ = cheerio.load(html);
   const tables = [];
-  // Store both the text rows (for raw today pages) and the rich rows (for normalizers)
   $("table").each((_, tableEl) => {
     const textRows = parseHtmlTable($, tableEl);
     const richRows = parseHtmlTableRich($, tableEl);
@@ -215,12 +199,9 @@ function findCol(header, matchers) {
 }
 
 // ── BVP normalizer ────────────────────────────────────────────────────────────
-// Uses rich rows so the name cell uses playerNameFromCell() (name only)
-// and the game cell uses cellText() (img alt included).
-//
-// One row per player: all keys (team:name variants + name-only fallback) are
-// registered in `seen` for cross-table dedup, but only the first key gets a
-// row pushed to `out`.
+// Uses name-only keys (e.g. "m betts") — no team prefix.
+// FIC gives the matchup (BOS @ NYY) not the player's actual team, so team-prefixed
+// keys were unreliable. Name-only is unambiguous in practice.
 
 function normalizeBvpTables(tables) {
   const seen = new Set();
@@ -239,60 +220,33 @@ function normalizeBvpTables(tables) {
       continue;
     }
 
-    const iGame = findCol(header, [
-      "game", "matchup", "match",
-      (h) => h.startsWith("game") || h.startsWith("matchup"),
-    ]);
-
     const iAb  = findCol(header, ["#ab", "ab#", "ab", "at bats", "atbats", (h) => h === "ab"]);
     const iQab = findCol(header, ["qab%", "qab #", "qab", (h) => h.startsWith("qab")]);
     const iHh  = findCol(header, ["hh%", "hh", "hard hit%", "hard hit", (h) => h.includes("hh") || h.includes("hard hit")]);
     const iHrf = findCol(header, ["hrf", "hr/f", "hr f", "hrfb", "hr f%", (h) => h.startsWith("hrf") || h.startsWith("hr/f") || h.startsWith("hr f")]);
 
-    console.log(`[fic] BVP table (${textRows.length - 1} rows): name:${iName} game:${iGame} ab:${iAb} qab:${iQab} hh:${iHh} hrf:${iHrf}`);
+    console.log(`[fic] BVP table (${textRows.length - 1} rows): name:${iName} ab:${iAb} qab:${iQab} hh:${iHh} hrf:${iHrf}`);
 
-    // Skip header row in richRows (index 0)
     for (let i = 1; i < richRows.length; i++) {
       const richRow = richRows[i];
       const textRow = textRows[i];
 
-      // Extract clean player name from the cell element
       const rawName = playerNameFromCell($, richRow[iName]);
       if (!rawName) continue;
 
-      const normalized = normalizeName(rawName);
-      if (!normalized) continue;
+      const key = normalizeName(rawName);
+      if (!key) continue;
 
-      const statCols = [
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      out.push([
+        key,
         iAb  >= 0 ? (textRow[iAb]  || "") : "",
         iQab >= 0 ? (textRow[iQab] || "") : "",
         iHh  >= 0 ? (textRow[iHh]  || "") : "",
         iHrf >= 0 ? (textRow[iHrf] || "") : "",
-      ];
-
-      // Extract game cell with img alt support
-      const gameRaw = iGame >= 0 ? cellText($, richRow[iGame]) : "";
-      const teams = teamsFromGame(gameRaw);
-      console.log(`[fic] BVP: "${normalized}" game:"${gameRaw}" teams:[${teams.join(",")}]`);
-
-      const keys = [
-        ...teams.map((t) => `${t}:${normalized}`),
-        normalized, // name-only fallback
-      ];
-
-      // Register all keys in `seen` for dedup, but push only ONE row (the first key).
-      let pushed = false;
-      for (const key of keys) {
-        if (seen.has(key)) {
-          if (!pushed) pushed = true; // already written by a prior table — skip entirely
-          continue;
-        }
-        seen.add(key);
-        if (!pushed) {
-          out.push([key, ...statCols]);
-          pushed = true;
-        }
-      }
+      ]);
     }
   }
 
@@ -301,8 +255,7 @@ function normalizeBvpTables(tables) {
 }
 
 // ── SB normalizer ─────────────────────────────────────────────────────────────
-// One row per player: same fix as BVP — register all keys in `seen` but only
-// push the first key as the Notion row.
+// Same approach: name-only keys, no team prefix.
 
 function normalizeSbTables(tables) {
   const seen = new Set();
@@ -321,11 +274,6 @@ function normalizeSbTables(tables) {
       continue;
     }
 
-    const iGame = findCol(header, [
-      "game", "matchup", "match",
-      (h) => h.startsWith("game") || h.startsWith("matchup"),
-    ]);
-
     const iSb = findCol(header, [
       "sb%", "steal%", "sb probability", "steal probability",
       (h) => h.includes("sb") || h.includes("steal") || h.includes("prob"),
@@ -335,7 +283,7 @@ function normalizeSbTables(tables) {
       continue;
     }
 
-    console.log(`[fic] SB table (${textRows.length - 1} rows): name:${iName} game:${iGame} sb:${iSb}`);
+    console.log(`[fic] SB table (${textRows.length - 1} rows): name:${iName} sb:${iSb}`);
 
     for (let i = 1; i < richRows.length; i++) {
       const richRow = richRows[i];
@@ -344,31 +292,13 @@ function normalizeSbTables(tables) {
       const rawName = playerNameFromCell($, richRow[iName]);
       if (!rawName) continue;
 
-      const normalized = normalizeName(rawName);
-      if (!normalized) continue;
+      const key = normalizeName(rawName);
+      if (!key) continue;
 
-      const sbVal = textRow[iSb] || "";
-      const gameRaw = iGame >= 0 ? cellText($, richRow[iGame]) : "";
-      const teams = teamsFromGame(gameRaw);
+      if (seen.has(key)) continue;
+      seen.add(key);
 
-      const keys = [
-        ...teams.map((t) => `${t}:${normalized}`),
-        normalized,
-      ];
-
-      // Register all keys in `seen` for dedup, but push only ONE row (the first key).
-      let pushed = false;
-      for (const key of keys) {
-        if (seen.has(key)) {
-          if (!pushed) pushed = true; // already written by a prior table — skip entirely
-          continue;
-        }
-        seen.add(key);
-        if (!pushed) {
-          out.push([key, sbVal]);
-          pushed = true;
-        }
-      }
+      out.push([key, textRow[iSb] || ""]);
     }
   }
 
@@ -415,7 +345,6 @@ async function writeRawTablePageToNotion(pageId, label, date, tables, sourceUrl)
     `Last synced: ${ts} MT`,
     `Source: ${sourceUrl}`,
   ];
-  // Use textRows for raw today pages
   const textTables = tables.map((t) => t.textRows);
   if (!textTables || textTables.length === 0) {
     await overwritePageWithTable(pageId, headerLines, ["(no data)"], []);
