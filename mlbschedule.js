@@ -1,14 +1,25 @@
 // mlbschedule.js
-// Fetches the MLB schedule for today, tomorrow, or a full week from the MLB Stats API
-// and overwrites the corresponding Notion pages with a clean game-by-game table.
+// Fetches the MLB schedule from the MLB Stats API and, for today/tomorrow syncs,
+// enriches each game with implied run totals derived from The Odds API (h2h + totals).
 //
 // MLB Stats API (free, no auth): https://statsapi.mlb.com/api/v1/schedule
-//   ?sportId=1&date=YYYY-MM-DD                        → single day
-//   ?sportId=1&startDate=YYYY-MM-DD&endDate=YYYY-MM-DD → date range
+// The Odds API (requires ODDS_API_KEY): https://api.the-odds-api.com/v4/sports/baseball_mlb/odds
+//
+// Implied run total methodology:
+//   1. Pull game total (over/under) and moneyline for both teams from The Odds API.
+//   2. Convert moneyline → win probability (no-vig):
+//        ML < 0:  p = (-ML) / (-ML + 100)
+//        ML > 0:  p = 100  / (ML  + 100)
+//   3. Normalize the two raw probabilities to sum to 1.0 (remove vig).
+//   4. Split total proportionally:
+//        home implied = total × p_home_norm
+//        away implied = total × p_away_norm
+//   If odds are unavailable for a game, the implied columns show “—”.
 
 import axios from "axios";
 import {
   NOTION_TOKEN,
+  ODDS_API_KEY,
   MLB_SCHEDULE_TODAY_PAGE_ID,
   MLB_SCHEDULE_TOMORROW_PAGE_ID,
   MLB_SCHEDULE_WEEK_PAGE_ID,
@@ -18,11 +29,13 @@ import { logRun } from "./notion.js";
 import { overwritePageWithTable } from "./notiontables.js";
 
 requireEnv("NOTION_TOKEN", NOTION_TOKEN);
+requireEnv("ODDS_API_KEY", ODDS_API_KEY);
 requireEnv("MLB_SCHEDULE_TODAY_PAGE_ID", MLB_SCHEDULE_TODAY_PAGE_ID);
 requireEnv("MLB_SCHEDULE_TOMORROW_PAGE_ID", MLB_SCHEDULE_TOMORROW_PAGE_ID);
 requireEnv("MLB_SCHEDULE_WEEK_PAGE_ID", MLB_SCHEDULE_WEEK_PAGE_ID);
 
-const MLB_API_BASE = "https://statsapi.mlb.com/api/v1/schedule";
+const MLB_API_BASE  = "https://statsapi.mlb.com/api/v1/schedule";
+const ODDS_API_BASE = "https://api.the-odds-api.com/v4/sports/baseball_mlb/odds";
 
 // ── Date helpers (Mountain Time) ─────────────────────────────────────────────
 
@@ -41,7 +54,7 @@ function getMtTimestamp() {
   });
 }
 
-// ── MLB Stats API fetch ───────────────────────────────────────────────────────
+// ── MLB Stats API ────────────────────────────────────────────────────────────────
 
 async function fetchSchedule({ date, startDate, endDate }) {
   const params = { sportId: 1, hydrate: "team,venue" };
@@ -51,23 +64,121 @@ async function fetchSchedule({ date, startDate, endDate }) {
     params.startDate = startDate;
     params.endDate   = endDate;
   }
-
   const resp = await axios.get(MLB_API_BASE, { params, timeout: 15000 });
-  return resp.data; // { dates: [ { date, games: [...] } ] }
+  return resp.data;
 }
 
-// ── Parse API response into table rows ───────────────────────────────────────
+// ── The Odds API ────────────────────────────────────────────────────────────────
 //
-// Columns: Date | Time (MT) | Away | Home | Venue | Status
+// Returns a Map keyed by a normalised "away@home" string → { total, awayML, homeML }
+// Uses the first bookmaker that has both h2h and totals markets populated.
 
-function parseScheduleToRows(data) {
+function mlToProb(ml) {
+  if (ml < 0) return (-ml) / (-ml + 100);
+  return 100 / (ml + 100);
+}
+
+function normaliseName(name) {
+  // Strip common suffixes/prefixes so MLB API names match Odds API names.
+  // Both use full franchise names (e.g. "Los Angeles Dodgers") so this is
+  // mostly a safety trim.
+  return name.trim().toLowerCase();
+}
+
+async function fetchOddsMap() {
+  const oddsMap = new Map(); // key: "away_norm|home_norm" → { total, awayML, homeML }
+
+  try {
+    const resp = await axios.get(ODDS_API_BASE, {
+      params: {
+        apiKey: ODDS_API_KEY,
+        regions: "us",
+        markets: "h2h,totals",
+        oddsFormat: "american",
+      },
+      timeout: 15000,
+    });
+
+    for (const event of (resp.data || [])) {
+      const awayName = normaliseName(event.away_team || "");
+      const homeName = normaliseName(event.home_team || "");
+      const key = `${awayName}|${homeName}`;
+
+      let total = null;
+      let awayML = null;
+      let homeML = null;
+
+      // Iterate bookmakers; take the first one that has both markets.
+      for (const bk of (event.bookmakers || [])) {
+        const h2hMarket     = bk.markets?.find(m => m.key === "h2h");
+        const totalsMarket  = bk.markets?.find(m => m.key === "totals");
+
+        if (!h2hMarket || !totalsMarket) continue;
+
+        // totals: outcomes are [{name:"Over",point:8.5,...},{name:"Under",...}]
+        const overOutcome = totalsMarket.outcomes?.find(o => o.name === "Over");
+        if (!overOutcome?.point) continue;
+
+        // h2h: outcomes are [{name:"<away team>",price:...},{name:"<home team>",price:...}]
+        const awayOutcome = h2hMarket.outcomes?.find(
+          o => normaliseName(o.name) === awayName
+        );
+        const homeOutcome = h2hMarket.outcomes?.find(
+          o => normaliseName(o.name) === homeName
+        );
+
+        if (!awayOutcome || !homeOutcome) continue;
+
+        total  = overOutcome.point;
+        awayML = awayOutcome.price;
+        homeML = homeOutcome.price;
+        break; // first valid bookmaker is enough
+      }
+
+      if (total !== null && awayML !== null && homeML !== null) {
+        oddsMap.set(key, { total, awayML, homeML });
+      }
+    }
+  } catch (err) {
+    // Non-fatal: log and return empty map; rows will show "—" for implied totals.
+    console.error("[mlbschedule] Odds API fetch failed:", err?.message || err);
+  }
+
+  return oddsMap;
+}
+
+// Given odds data for one game, compute implied run totals.
+// Returns { awayImplied, homeImplied } as strings like "3.8" or "—".
+function computeImplied(oddsEntry) {
+  if (!oddsEntry) return { awayImplied: "—", homeImplied: "—" };
+
+  const { total, awayML, homeML } = oddsEntry;
+
+  const rawAway = mlToProb(awayML);
+  const rawHome = mlToProb(homeML);
+  const sum     = rawAway + rawHome;
+
+  const pAway = rawAway / sum; // normalised (vig removed)
+  const pHome = rawHome / sum;
+
+  return {
+    awayImplied: (total * pAway).toFixed(1),
+    homeImplied: (total * pHome).toFixed(1),
+  };
+}
+
+// ── Parse schedule → rows (with optional odds enrichment) ─────────────────────────
+//
+// withOdds=true  → columns include O/U, Away Runs, Home Runs (today & tomorrow)
+// withOdds=false → plain 6-column table (week view)
+
+function parseScheduleToRows(data, oddsMap = null) {
   const rows = [];
 
   for (const dateEntry of (data.dates || [])) {
     for (const game of (dateEntry.games || [])) {
-      const gameDate = dateEntry.date; // YYYY-MM-DD
+      const gameDate = dateEntry.date;
 
-      // Game time → convert UTC ISO to MT
       let timeMt = "TBD";
       if (game.gameDate) {
         timeMt = new Date(game.gameDate).toLocaleTimeString("en-US", {
@@ -78,12 +189,21 @@ function parseScheduleToRows(data) {
         });
       }
 
-      const away   = game.teams?.away?.team?.name  || "—";
-      const home   = game.teams?.home?.team?.name  || "—";
-      const venue  = game.venue?.name              || "—";
-      const status = game.status?.detailedState    || "—";
+      const away   = game.teams?.away?.team?.name || "—";
+      const home   = game.teams?.home?.team?.name || "—";
+      const venue  = game.venue?.name             || "—";
+      const status = game.status?.detailedState   || "—";
 
-      rows.push([gameDate, timeMt, away, home, venue, status]);
+      if (oddsMap) {
+        const key        = `${normaliseName(away)}|${normaliseName(home)}`;
+        const oddsEntry  = oddsMap.get(key) || null;
+        const ouTotal    = oddsEntry ? String(oddsEntry.total) : "—";
+        const { awayImplied, homeImplied } = computeImplied(oddsEntry);
+
+        rows.push([gameDate, timeMt, away, home, venue, status, ouTotal, awayImplied, homeImplied]);
+      } else {
+        rows.push([gameDate, timeMt, away, home, venue, status]);
+      }
     }
   }
 
@@ -92,11 +212,16 @@ function parseScheduleToRows(data) {
 
 // ── Write to Notion ───────────────────────────────────────────────────────────
 
-async function writeScheduleToNotion(pageId, headerLines, rows) {
-  const columns = ["Date", "Time (MT)", "Away", "Home", "Venue", "Status"];
+async function writeScheduleToNotion(pageId, headerLines, rows, withOdds = false) {
+  const baseColumns = ["Date", "Time (MT)", "Away", "Home", "Venue", "Status"];
+  const oddsColumns = ["O/U", "Away Runs", "Home Runs"];
+  const columns     = withOdds ? [...baseColumns, ...oddsColumns] : baseColumns;
+  const emptyRow    = withOdds
+    ? ["No games scheduled", "", "", "", "", "", "", "", ""]
+    : ["No games scheduled", "", "", "", "", ""];
 
   if (rows.length === 0) {
-    await overwritePageWithTable(pageId, headerLines, columns, [["No games scheduled", "", "", "", "", ""]]);
+    await overwritePageWithTable(pageId, headerLines, columns, [emptyRow]);
   } else {
     await overwritePageWithTable(pageId, headerLines, columns, rows);
   }
@@ -109,16 +234,21 @@ export async function runMlbScheduleTodaySync() {
   const ts        = getMtTimestamp();
   const sourceUrl = `${MLB_API_BASE}?sportId=1&date=${date}`;
 
-  const data = await fetchSchedule({ date });
-  const rows = parseScheduleToRows(data);
+  const [scheduleData, oddsMap] = await Promise.all([
+    fetchSchedule({ date }),
+    fetchOddsMap(),
+  ]);
+
+  const rows = parseScheduleToRows(scheduleData, oddsMap);
 
   const headerLines = [
     `MLB Schedule — Today (${date})`,
     `Last synced: ${ts} MT`,
+    `Implied runs = O/U split by moneyline win probability (no-vig)`,
     `Source: ${sourceUrl}`,
   ];
 
-  await writeScheduleToNotion(MLB_SCHEDULE_TODAY_PAGE_ID, headerLines, rows);
+  await writeScheduleToNotion(MLB_SCHEDULE_TODAY_PAGE_ID, headerLines, rows, true);
   await logRun({ name: `MLB Schedule Today (${date}) — ${new Date().toISOString()}` });
 
   return { date, games: rows.length };
@@ -129,16 +259,21 @@ export async function runMlbScheduleTomorrowSync() {
   const ts        = getMtTimestamp();
   const sourceUrl = `${MLB_API_BASE}?sportId=1&date=${date}`;
 
-  const data = await fetchSchedule({ date });
-  const rows = parseScheduleToRows(data);
+  const [scheduleData, oddsMap] = await Promise.all([
+    fetchSchedule({ date }),
+    fetchOddsMap(),
+  ]);
+
+  const rows = parseScheduleToRows(scheduleData, oddsMap);
 
   const headerLines = [
     `MLB Schedule — Tomorrow (${date})`,
     `Last synced: ${ts} MT`,
+    `Implied runs = O/U split by moneyline win probability (no-vig)`,
     `Source: ${sourceUrl}`,
   ];
 
-  await writeScheduleToNotion(MLB_SCHEDULE_TOMORROW_PAGE_ID, headerLines, rows);
+  await writeScheduleToNotion(MLB_SCHEDULE_TOMORROW_PAGE_ID, headerLines, rows, true);
   await logRun({ name: `MLB Schedule Tomorrow (${date}) — ${new Date().toISOString()}` });
 
   return { date, games: rows.length };
@@ -153,7 +288,7 @@ export async function runMlbScheduleWeekSync() {
   const sourceUrl = `${MLB_API_BASE}?sportId=1&startDate=${startDate}&endDate=${endDate}`;
 
   const data = await fetchSchedule({ startDate, endDate });
-  const rows = parseScheduleToRows(data);
+  const rows = parseScheduleToRows(data); // no odds for week view
 
   const headerLines = [
     `MLB Schedule — Week Ahead (${startDate} → ${endDate})`,
@@ -161,7 +296,7 @@ export async function runMlbScheduleWeekSync() {
     `Source: ${sourceUrl}`,
   ];
 
-  await writeScheduleToNotion(MLB_SCHEDULE_WEEK_PAGE_ID, headerLines, rows);
+  await writeScheduleToNotion(MLB_SCHEDULE_WEEK_PAGE_ID, headerLines, rows, false);
   await logRun({ name: `MLB Schedule Week (${startDate}–${endDate}) — ${new Date().toISOString()}` });
 
   return { startDate, endDate, games: rows.length };
