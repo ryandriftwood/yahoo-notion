@@ -35,8 +35,14 @@ function teamKeys() {
 }
 
 // ---------------------------------------------------------------------------
-// STAT ENRICHMENT HELPERS
-// Ported from rotowire-projected.js — name normalization + map lookups
+// NAME NORMALIZATION + MAP LOOKUPS
+// Identical to rotowire-projected.js so BVP/SB keys match.
+//
+// FIC stores player names in abbreviated form: "M. Betts"
+// normalizeName("M. Betts") => "m betts"
+// Roster full names: normalizeName("Mookie Betts") => "mookie betts"
+// initialLastKey("mookie betts") => "m betts"  ← matches FIC key
+// So lookupMap always tries full key first, then initial+last fallback.
 // ---------------------------------------------------------------------------
 
 function normalizeName(name) {
@@ -55,11 +61,14 @@ function initialLastKey(n) {
   return `${parts[0][0]} ${parts.slice(1).join(" ")}`;
 }
 
+// Try full normalized name first, then initial+last abbreviation fallback.
+// e.g. lookupMap(map, "mookie betts") tries "mookie betts", then "m betts"
 function lookupMap(map, key) {
   if (map[key] !== undefined) return map[key];
   return map[initialLastKey(key)];
 }
 
+// SB% map may use team-prefixed keys; fall back to name-only.
 function lookupMapWithTeam(map, key, team) {
   if (team) {
     const t = team.toLowerCase();
@@ -79,8 +88,21 @@ async function parseXml(xml) {
 }
 
 // ---------------------------------------------------------------------------
+// FLEXIBLE COLUMN FINDER
+// Ported from fantasyinfocentral.js — handles raw FIC header variants.
+// ---------------------------------------------------------------------------
+
+function findCol(header, matchers) {
+  return header.findIndex((h) => {
+    const lh = h.toLowerCase().trim();
+    return matchers.some((m) =>
+      typeof m === "function" ? m(lh) : lh === m || lh.startsWith(m) || lh.includes(m)
+    );
+  });
+}
+
+// ---------------------------------------------------------------------------
 // NOTION TABLE READER
-// Ported from rotowire-projected.js
 // ---------------------------------------------------------------------------
 
 async function readNotionTableRows(pageId) {
@@ -115,21 +137,50 @@ async function readNotionTableRows(pageId) {
 
 // ---------------------------------------------------------------------------
 // BVP MAP — today's matchups (FIC_BVP_TODAY_PAGE_ID)
-// Schema: Player | #AB | QAB% | HH% | HRF
+//
+// Today's page is written by writeRawTablePageToNotion (raw FIC scrape),
+// so headers are whatever FIC uses natively — NOT the fixed normalized schema.
+// We use findCol() with flexible matchers, same as fantasyinfocentral.js does
+// when normalizing tomorrow's data.
+//
+// Player keys stored as normalizeName(rawFicName), e.g. "m betts".
+// lookupMap() matches these via initialLastKey fallback on roster full names.
 // ---------------------------------------------------------------------------
 
 async function fetchBvpMap() {
   if (!FIC_BVP_TODAY_PAGE_ID) { console.warn("[sync] FIC_BVP_TODAY_PAGE_ID not set — skipping BVP."); return {}; }
   const rows = await readNotionTableRows(FIC_BVP_TODAY_PAGE_ID);
   if (rows.length < 2) { console.warn("[sync] BVP table empty."); return {}; }
-  const h = rows[0].map((x) => x.trim());
-  const iName = h.indexOf("Player"), iAb = h.indexOf("#AB"), iQab = h.indexOf("QAB%"), iHh = h.indexOf("HH%"), iHrf = h.indexOf("HRF");
-  if (iName === -1) { console.warn("[sync] BVP missing Player column."); return {}; }
+
+  const header = rows[0].map((x) => x.trim());
+  console.log("[sync] BVP raw headers:", header);
+
+  // Flexible column matching — mirrors fantasyinfocentral.js normalizeBvpTables()
+  const iName = findCol(header, [
+    "batter", "player", "hitter", "name",
+    (h) => h.startsWith("batter") || h.startsWith("player") || h.startsWith("hitter"),
+  ]);
+  if (iName === -1) { console.warn("[sync] BVP: no name column found. Headers:", header); return {}; }
+
+  const iAb  = findCol(header, ["#ab", "at bats", "atbats", (h) => h === "ab" || h === "#ab"]);
+  const iQab = findCol(header, ["qab%", "qab #", "qab", (h) => h.startsWith("qab")]);
+  const iHh  = findCol(header, ["hh%", "hh", "hard hit%", "hard hit", (h) => h.includes("hh") || h.includes("hard hit")]);
+  const iHrf = findCol(header, ["hrf", "hr/f", "hr f", "hrfb", (h) => h.startsWith("hrf") || h.startsWith("hr/f")]);
+
+  console.log(`[sync] BVP cols — name:${iName} ab:${iAb} qab:${iQab} hh:${iHh} hrf:${iHrf}`);
+
   const map = {};
   for (const row of rows.slice(1)) {
-    const key = row[iName]?.trim();
+    const rawName = row[iName]?.trim();
+    if (!rawName) continue;
+    const key = normalizeName(rawName);  // e.g. "m betts" — matches via initialLastKey fallback
     if (!key) continue;
-    map[key] = { ab: row[iAb] || "", qab: row[iQab] || "", hhPct: row[iHh] || "", hrf: row[iHrf] || "" };
+    map[key] = {
+      ab:    iAb  >= 0 ? (row[iAb]  || "") : "",
+      qab:   iQab >= 0 ? (row[iQab] || "") : "",
+      hhPct: iHh  >= 0 ? (row[iHh]  || "") : "",
+      hrf:   iHrf >= 0 ? (row[iHrf] || "") : "",
+    };
   }
   console.log(`[sync] BVP map: ${Object.keys(map).length} players`);
   return map;
@@ -137,19 +188,38 @@ async function fetchBvpMap() {
 
 // ---------------------------------------------------------------------------
 // SB MAP — today's matchups (FIC_SB_TODAY_PAGE_ID)
-// Schema: Player | SB%
+//
+// Same situation as BVP: raw FIC headers, flexible column matching.
 // ---------------------------------------------------------------------------
 
 async function fetchSbMap() {
   if (!FIC_SB_TODAY_PAGE_ID) { console.warn("[sync] FIC_SB_TODAY_PAGE_ID not set — skipping SB%."); return {}; }
   const rows = await readNotionTableRows(FIC_SB_TODAY_PAGE_ID);
   if (rows.length < 2) { console.warn("[sync] SB table empty."); return {}; }
-  const h = rows[0].map((x) => x.trim());
-  const iName = h.indexOf("Player"), iSb = h.indexOf("SB%");
-  if (iName === -1 || iSb === -1) { console.warn("[sync] SB missing expected columns."); return {}; }
+
+  const header = rows[0].map((x) => x.trim());
+  console.log("[sync] SB raw headers:", header);
+
+  // Flexible column matching — mirrors fantasyinfocentral.js normalizeSbTables()
+  const iName = findCol(header, [
+    "player", "batter", "hitter", "name", "runner",
+    (h) => h.startsWith("player") || h.startsWith("batter") || h.startsWith("hitter"),
+  ]);
+  if (iName === -1) { console.warn("[sync] SB: no name column found. Headers:", header); return {}; }
+
+  const iSb = findCol(header, [
+    "sb%", "steal%", "sb probability", "steal probability",
+    (h) => h.includes("sb") || h.includes("steal") || h.includes("prob"),
+  ]);
+  if (iSb === -1) { console.warn("[sync] SB: no SB% column found. Headers:", header); return {}; }
+
+  console.log(`[sync] SB cols — name:${iName} sb:${iSb}`);
+
   const map = {};
   for (const row of rows.slice(1)) {
-    const key = row[iName]?.trim();
+    const rawName = row[iName]?.trim();
+    if (!rawName) continue;
+    const key = normalizeName(rawName);  // e.g. "m betts"
     if (!key) continue;
     map[key] = row[iSb] || "";
   }
@@ -229,7 +299,7 @@ function formatEnrichedPlayerLine(playerStr, ops7day, opsSeason, bvp, sbPct) {
 }
 
 // ---------------------------------------------------------------------------
-// MAIN ENTRY POINT  (original structure preserved)
+// MAIN ENTRY POINT  (original structure preserved exactly)
 // ---------------------------------------------------------------------------
 
 export async function runSync() {
@@ -257,7 +327,7 @@ export async function runSync() {
     const parsed = await parseTeamRoster(xml);
     rosterResults.push(parsed);
 
-    // Extract player_key + mlbTeam from the same XML without a second fetch
+    // Re-parse the same XML to extract player_key + mlbTeam (no extra fetch)
     const rawParsed = await parseXml(xml);
     const players = asArray(rawParsed?.fantasy_content?.team?.roster?.players?.player);
     for (const pl of players) {
@@ -279,7 +349,7 @@ export async function runSync() {
     fetchSbMap().catch((e) => { console.error("[sync] SB% failed:", e.message); return {}; }),
   ]);
 
-  // 3) Free agents: top 400 hitters + top 600 pitchers by Yahoo rank  — identical to original
+  // 3) Free agents — identical to original
   const hittersTarget = 400;
   const pitchersTarget = 600;
   const pageSize = 25;
@@ -321,11 +391,10 @@ export async function runSync() {
   const freeAgents = [...hitters, ...pitchers];
   const total = freeAgents.length;
 
-  // 4) Write to Notion — rosters enriched, free agents list unchanged
+  // 4) Build enriched roster markdown + write to Notion
   //
-  // Player strings from parseTeamRoster look like:
-  //   "Mookie Betts — OF (OF, 1B) — LAD"
-  // Name = everything before the first " — "; mlbTeam from rosterPlayerTeam map.
+  // Player strings from parseTeamRoster: "Mookie Betts — OF (OF, 1B) — LAD"
+  // Name extracted by splitting on em-dash; mlbTeam from rosterPlayerTeam map.
   const legend = "Legend: 7-day OPS = last 7 days | Season OPS = season to date | BVP = vs today's pitcher (#AB, QAB%, HH%, HRF) | SB% = steal probability";
 
   const rostersMd =
@@ -334,14 +403,13 @@ export async function runSync() {
       .map((t) => {
         const header = `${t.team_name || t.team_key}`;
         const lines = (t.players || []).map((p) => {
-          // Extract name from display string (everything before first " — ")
-          const nameOnly = p.split(" \u2014 ")[0].trim();
+          const nameOnly = p.split(" \u2014 ")[0].trim();  // split on em-dash "\u2014"
           const key = normalizeName(nameOnly);
-          const mlbTeam = rosterPlayerTeam[key] || "";
-          const ops7day   = lookupMap(ops7DayMap, key) || "";
-          const opsSeason = lookupMap(opsSeasonMap, key) || "";
-          const bvp       = lookupMap(bvpMap, key) || null;
-          const sbPct     = lookupMapWithTeam(sbMap, key, mlbTeam) || "";
+          const mlbTeam  = rosterPlayerTeam[key] || "";
+          const ops7day  = lookupMap(ops7DayMap, key) || "";
+          const opsSeason= lookupMap(opsSeasonMap, key) || "";
+          const bvp      = lookupMap(bvpMap, key) || null;
+          const sbPct    = lookupMapWithTeam(sbMap, key, mlbTeam) || "";
           return `- ${formatEnrichedPlayerLine(p, ops7day, opsSeason, bvp, sbPct)}`;
         }).join("\n");
         return `## ${header}\n${lines}`;
