@@ -42,6 +42,9 @@ export const MLB_SCHEDULE_TODAY_PAGE_ID    = process.env.MLB_SCHEDULE_TODAY_PAGE
 export const MLB_SCHEDULE_TOMORROW_PAGE_ID = process.env.MLB_SCHEDULE_TOMORROW_PAGE_ID;
 export const MLB_SCHEDULE_WEEK_PAGE_ID     = process.env.MLB_SCHEDULE_WEEK_PAGE_ID;
 
+// ── Odds API ─────────────────────────────────────────────────────────────────────────────
+export const ODDS_API_KEY = process.env.ODDS_API_KEY;
+
 export function requireEnv(name, val) {
 	if (!val) throw new Error(`Missing env var ${name}`);
 }
