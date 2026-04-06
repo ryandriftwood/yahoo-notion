@@ -7,9 +7,10 @@
 //   BVP:  Player | #AB | QAB% | HH% | HRF
 //   SB:   Player | SB%
 //
-// Player keys are stored as "team:normalizedname" (e.g. "bos:m betts") so that
-// rotowire-projected.js can disambiguate players with the same first-initial + last name
-// on different teams.  The team prefix comes from the first 3 chars of the Game column.
+// Player keys are stored as BOTH "awayteam:normalizedname" AND "hometeam:normalizedname"
+// (e.g. "bos:m betts" and "nyy:m betts") so that rotowire-projected.js can match
+// regardless of which side of the @ the batter is on, and regardless of how the
+// FIC game cell is formatted.  The name-only key is also stored as a final fallback.
 
 import axios from "axios";
 import * as cheerio from "cheerio";
@@ -38,7 +39,6 @@ const SB_BASE  = "https://www.fantasyinfocentral.com/betting/mlb/sb-predictions"
 
 // ── Fixed output schemas ──────────────────────────────────────────────────────
 // These are the EXACT headers rotowire-projected.js expects to find.
-// Player values are stored as "team:normalizedname" (e.g. "bos:m betts").
 const BVP_COLUMNS = ["Player", "#AB", "QAB%", "HH%", "HRF"];
 const SB_COLUMNS  = ["Player", "SB%"];
 
@@ -71,15 +71,25 @@ function normalizeName(name) {
 }
 
 // ── Team key helper ───────────────────────────────────────────────────────────
-// Extracts the batter's team abbreviation from the Game column value.
-// FIC Game column format: "BOS@NYY", "LAD@SD", etc.
-// The first 3 characters are the away team (batter's team for away batters),
-// but since all batters in a given row belong to the team listed first in their
-// game entry, we just take the first 3 chars and lowercase them.
+// Extracts BOTH team abbreviations from a FIC game cell.
+// FIC game cells may be formatted as:
+//   "BOS@NYY"   → ["bos", "nyy"]
+//   "BOS @ NYY" → ["bos", "nyy"]
+//   "@ NYY"     → ["", "nyy"]   (only home team visible)
+//   "@"         → []            (unparseable — return empty)
+//
+// We store a key for EACH team so the lookup in rotowire-projected.js succeeds
+// regardless of which side of the matchup a batter is on.
 
-function teamFromGame(gameCell) {
-  if (!gameCell) return "";
-  return gameCell.trim().slice(0, 3).toLowerCase();
+function teamsFromGame(gameCell) {
+  if (!gameCell) return [];
+  // Strip any extra whitespace and split on @
+  const parts = gameCell.trim().split("@").map((p) => p.trim().toLowerCase());
+  // Extract only the first 2-3 alpha chars from each part (team abbrev)
+  const abbrevs = parts
+    .map((p) => p.replace(/[^a-z]/g, "").slice(0, 3))
+    .filter((p) => p.length >= 2); // must be at least 2 chars to be a real abbrev
+  return abbrevs;
 }
 
 // ── Browserless helper ───────────────────────────────────────────────────────
@@ -129,7 +139,6 @@ async function scrapeTablesFromUrl(url) {
 }
 
 // ── Column finder — fuzzy match against a raw FIC header row ──────────────────
-// Returns the column index for a given stat, or -1 if not found.
 
 function findCol(header, matchers) {
   return header.findIndex((h) => {
@@ -141,10 +150,9 @@ function findCol(header, matchers) {
 }
 
 // ── BVP normalizer ────────────────────────────────────────────────────────────
-// Takes raw scraped tables (any schema, any number of tables) and produces
-// a single clean array of rows matching BVP_COLUMNS exactly.
-// Player key format: "team:normalizedname" (e.g. "bos:m betts")
-// Falls back to normalizedname alone if no Game column is found.
+// For each player, stores a key for EVERY team abbrev found in the game cell,
+// plus a name-only key as a final fallback.
+// This ensures rotowire-projected.js can match via "awayteam:name" OR "hometeam:name".
 
 function normalizeBvpTables(tables) {
   const seen = new Set();
@@ -155,7 +163,6 @@ function normalizeBvpTables(tables) {
     const rawHeader = table[0];
     const header = rawHeader.map((h) => h.toLowerCase().trim());
 
-    // Find player name column (batter)
     const iName = findCol(header, [
       "batter", "player", "hitter", "name",
       (h) => h.startsWith("batter") || h.startsWith("player") || h.startsWith("hitter"),
@@ -165,13 +172,11 @@ function normalizeBvpTables(tables) {
       continue;
     }
 
-    // Find Game column — first 3 chars are the batter's team abbreviation
     const iGame = findCol(header, [
       "game", "matchup", "match",
       (h) => h.startsWith("game") || h.startsWith("matchup"),
     ]);
 
-    // Find stat columns
     const iAb  = findCol(header, ["#ab", "ab#", "ab", "at bats", "atbats", (h) => h === "ab"]);
     const iQab = findCol(header, ["qab%", "qab #", "qab", (h) => h.startsWith("qab")]);
     const iHh  = findCol(header, ["hh%", "hh", "hard hit%", "hard hit", (h) => h.includes("hh") || h.includes("hard hit")]);
@@ -186,32 +191,39 @@ function normalizeBvpTables(tables) {
       const normalized = normalizeName(rawName);
       if (!normalized) continue;
 
-      // Build team-qualified key: "team:normalizedname"
-      // Falls back to normalizedname alone if no game cell available
-      const team = iGame >= 0 ? teamFromGame(row[iGame]) : "";
-      const playerKey = team ? `${team}:${normalized}` : normalized;
-
-      if (seen.has(playerKey)) continue;
-      seen.add(playerKey);
-
-      out.push([
-        playerKey,
+      const statCols = [
         iAb  >= 0 ? (row[iAb]  || "") : "",
         iQab >= 0 ? (row[iQab] || "") : "",
         iHh  >= 0 ? (row[iHh]  || "") : "",
         iHrf >= 0 ? (row[iHrf] || "") : "",
-      ]);
+      ];
+
+      // Build all keys: one per team abbrev found in game cell + name-only fallback
+      const teams = iGame >= 0 ? teamsFromGame(row[iGame]) : [];
+      const keys = [
+        ...teams.map((t) => `${t}:${normalized}`),
+        normalized, // name-only fallback — always stored last
+      ];
+
+      if (teams.length === 0) {
+        console.log(`[fic] BVP: no team found for "${rawName}" game cell: "${iGame >= 0 ? row[iGame] : "(no game col)"}" — storing name-only key`);
+      } else {
+        console.log(`[fic] BVP: "${normalized}" → keys: ${keys.join(", ")}`);
+      }
+
+      for (const key of keys) {
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push([key, ...statCols]);
+      }
     }
   }
 
-  console.log(`[fic] BVP normalized: ${out.length} unique players across all tables`);
+  console.log(`[fic] BVP normalized: ${out.length} keys across all players/tables`);
   return out;
 }
 
 // ── SB normalizer ─────────────────────────────────────────────────────────────
-// Takes raw scraped tables and produces a single clean array of rows matching
-// SB_COLUMNS exactly.
-// Player key format: "team:normalizedname" (e.g. "bos:m betts")
 
 function normalizeSbTables(tables) {
   const seen = new Set();
@@ -231,7 +243,6 @@ function normalizeSbTables(tables) {
       continue;
     }
 
-    // Find Game column — first 3 chars are the batter's team abbreviation
     const iGame = findCol(header, [
       "game", "matchup", "match",
       (h) => h.startsWith("game") || h.startsWith("matchup"),
@@ -255,20 +266,23 @@ function normalizeSbTables(tables) {
       const normalized = normalizeName(rawName);
       if (!normalized) continue;
 
-      const team = iGame >= 0 ? teamFromGame(row[iGame]) : "";
-      const playerKey = team ? `${team}:${normalized}` : normalized;
+      const sbVal = row[iSb] || "";
 
-      if (seen.has(playerKey)) continue;
-      seen.add(playerKey);
+      const teams = iGame >= 0 ? teamsFromGame(row[iGame]) : [];
+      const keys = [
+        ...teams.map((t) => `${t}:${normalized}`),
+        normalized, // name-only fallback
+      ];
 
-      out.push([
-        playerKey,
-        iSb >= 0 ? (row[iSb] || "") : "",
-      ]);
+      for (const key of keys) {
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push([key, sbVal]);
+      }
     }
   }
 
-  console.log(`[fic] SB normalized: ${out.length} unique players across all tables`);
+  console.log(`[fic] SB normalized: ${out.length} keys across all players/tables`);
   return out;
 }
 
@@ -284,7 +298,6 @@ function getMtTimestamp() {
 }
 
 // ── Write a NORMALIZED table to Notion ────────────────────────────────────────
-// Uses a fixed column schema; passes normalized data rows directly.
 
 async function writeNormalizedTableToNotion(pageId, label, date, columns, rows, sourceUrl) {
   const ts = getMtTimestamp();
@@ -350,7 +363,6 @@ export async function runBvpTodaySync() {
   const date = todayDate();
   const url  = buildUrl(BVP_BASE, date);
   const tables = await scrapeTablesFromUrl(url);
-  // Today page: raw dump (not consumed by rotowire-projected)
   await writeRawTablePageToNotion(FIC_BVP_TODAY_PAGE_ID, "Batter vs Pitcher — Today", date, tables, url);
   await logRun({ name: `FIC BvP Today (${date}) — ${new Date().toISOString()}` });
   return { date, tables: tables.length, rows: tables.reduce((s, t) => s + t.length, 0) };
@@ -361,7 +373,6 @@ export async function runBvpTomorrowSync() {
   const url  = buildUrl(BVP_BASE, date);
   const tables = await scrapeTablesFromUrl(url);
 
-  // Normalize into fixed BVP schema for rotowire-projected.js
   const normalizedRows = normalizeBvpTables(tables);
   await writeNormalizedTableToNotion(
     FIC_BVP_TOMORROW_PAGE_ID,
@@ -380,7 +391,6 @@ export async function runSbTodaySync() {
   const date = todayDate();
   const url  = buildUrl(SB_BASE, date);
   const tables = await scrapeTablesFromUrl(url);
-  // Today page: raw dump
   await writeRawTablePageToNotion(FIC_SB_TODAY_PAGE_ID, "Steal Probability — Today", date, tables, url);
   await logRun({ name: `FIC SB Today (${date}) — ${new Date().toISOString()}` });
   return { date, tables: tables.length, rows: tables.reduce((s, t) => s + t.length, 0) };
@@ -391,7 +401,6 @@ export async function runSbTomorrowSync() {
   const url  = buildUrl(SB_BASE, date);
   const tables = await scrapeTablesFromUrl(url);
 
-  // Normalize into fixed SB schema for rotowire-projected.js
   const normalizedRows = normalizeSbTables(tables);
   await writeNormalizedTableToNotion(
     FIC_SB_TOMORROW_PAGE_ID,
