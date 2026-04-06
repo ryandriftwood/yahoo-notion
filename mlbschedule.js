@@ -145,8 +145,10 @@ export async function runMlbScheduleTomorrowSync() {
 }
 
 export async function runMlbScheduleWeekSync() {
-  const startDate = getMtDate(0);
-  const endDate   = getMtDate(6); // today + 6 days = 7-day window
+  // Runs Saturday morning — pulls the following Monday through Sunday (7 days).
+  // Saturday = day 0, so Monday ahead = +2, Sunday ahead = +8.
+  const startDate = getMtDate(2); // next Monday
+  const endDate   = getMtDate(8); // following Sunday
   const ts        = getMtTimestamp();
   const sourceUrl = `${MLB_API_BASE}?sportId=1&startDate=${startDate}&endDate=${endDate}`;
 
@@ -154,7 +156,7 @@ export async function runMlbScheduleWeekSync() {
   const rows = parseScheduleToRows(data);
 
   const headerLines = [
-    `MLB Schedule — This Week (${startDate} → ${endDate})`,
+    `MLB Schedule — Week Ahead (${startDate} → ${endDate})`,
     `Last synced: ${ts} MT`,
     `Source: ${sourceUrl}`,
   ];
