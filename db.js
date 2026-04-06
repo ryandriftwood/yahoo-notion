@@ -28,4 +28,36 @@ export async function ensureTables() {
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		);
 	`);
+
+	await pool.query(`
+		CREATE TABLE IF NOT EXISTS player_season_stats (
+			player_key   TEXT,
+			player_id    TEXT,
+			full_name    TEXT,
+			mlb_team     TEXT,
+			positions    TEXT,
+			status       TEXT,
+			or_rank      INTEGER,
+			stat_key     TEXT,
+			stat_value   TEXT,
+			updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			PRIMARY KEY (player_key, stat_key)
+		);
+	`);
+
+	await pool.query(`
+		CREATE TABLE IF NOT EXISTS player_7day_stats (
+			player_key    TEXT,
+			full_name     TEXT,
+			mlb_team      TEXT,
+			positions     TEXT,
+			status        TEXT,
+			or_rank       INTEGER,
+			stat_key      TEXT,
+			stat_value    TEXT,
+			snapshot_date DATE NOT NULL DEFAULT CURRENT_DATE,
+			updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			PRIMARY KEY (player_key, stat_key, snapshot_date)
+		);
+	`);
 }
