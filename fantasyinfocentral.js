@@ -8,13 +8,13 @@
 //   SB:   Player | SB%
 //
 // Player keys are stored as BOTH "awayteam:normalizedname" AND "hometeam:normalizedname"
-// (e.g. "bos:m betts" and "nyy:m betts") so that rotowire-projected.js can match
+// (e.g. "lan:m betts" and "nyy:m betts") so that rotowire-projected.js can match
 // regardless of which side of the @ the batter is on.
-// The name-only key is also stored as a final fallback.
+// A name-only key is also stored as a final fallback.
 //
-// FIC team columns use <img> tags (team logos) rather than text for team abbreviations.
-// cellText() extracts img alt/src values alongside text nodes so the game cell
-// produces a usable string like "BOS @ NYY" instead of just "@ ".
+// FIC player cells contain the name followed by position/hand/injury in sibling spans.
+// playerNameFromCell() extracts only the name (first <a> or first text node).
+// FIC game cells use <img> tags for team logos; cellText() reads img alt/src.
 
 import axios from "axios";
 import * as cheerio from "cheerio";
@@ -73,8 +73,7 @@ function normalizeName(name) {
 }
 
 // ── Team key helper ───────────────────────────────────────────────────────────
-// Extracts BOTH team abbreviations from a FIC game cell string.
-// Works with any format: "BOS@NYY", "BOS @ NYY", "@ NYY", etc.
+// Splits a game cell string on @ and returns both team abbrevs (2-3 alpha chars each).
 
 function teamsFromGame(gameCell) {
   if (!gameCell) return [];
@@ -84,43 +83,56 @@ function teamsFromGame(gameCell) {
     .filter((p) => p.length >= 2);
 }
 
-// ── Smart cell text extractor ────────────────────────────────────────────────
-// FIC uses <img> tags for team logos in the game/matchup column.
-// cheerio's .text() skips images entirely, giving "@ " instead of "BOS @ NYY".
-// This helper walks the cell's child nodes in order, collecting:
-//   - text nodes (trimmed)
-//   - <img> alt attribute (preferred), falling back to the filename in src
-//     (e.g. src="/images/teams/bos.png" → "bos")
-// The result is joined with spaces and collapsed, producing e.g. "BOS @ NYY".
+// ── Player name extractor ────────────────────────────────────────────────────
+// FIC player cells look like:
+//   <td><a href="...">M. Betts</a><span>SS</span><span>R</span><span>IL</span></td>
+// We want ONLY the player name, not position/hand/injury.
+// Strategy: take the text of the first <a> if present, else the first non-empty text node.
+
+function playerNameFromCell($, cellEl) {
+  // Prefer the first anchor's text (most reliable — FIC links player names)
+  const firstA = $(cellEl).find("a").first();
+  if (firstA.length) {
+    const t = firstA.text().trim();
+    if (t) return t;
+  }
+  // Fall back to first non-empty text node in the cell
+  let name = "";
+  $(cellEl).contents().each((_, node) => {
+    if (name) return false; // stop once found
+    if (node.type === "text") {
+      const t = (node.data || "").trim();
+      if (t) name = t;
+    }
+  });
+  return name;
+}
+
+// ── Game cell text extractor ────────────────────────────────────────────────
+// FIC game cells use <img> tags for team logos. cheerio .text() returns only "@ ".
+// This walks child nodes and collects img alt (preferred) or src filename stem
+// alongside literal text, producing e.g. "BOS @ NYY".
 
 function cellText($, cellEl) {
   const parts = [];
-
   $(cellEl).contents().each((_, node) => {
     if (node.type === "text") {
       const t = (node.data || "").trim();
       if (t) parts.push(t);
     } else if (node.type === "tag" && node.name === "img") {
       const el = $(node);
-      // Prefer alt text ("BOS", "NYY", etc.)
       const alt = (el.attr("alt") || "").trim();
-      if (alt) {
-        parts.push(alt);
-        return;
-      }
-      // Fall back to filename stem from src (e.g. "/img/mlb/teams/bos.png" → "bos")
+      if (alt) { parts.push(alt); return; }
       const src = (el.attr("src") || "").trim();
       if (src) {
         const stem = src.split("/").pop().split(".")[0];
         if (stem) parts.push(stem.toUpperCase());
       }
     } else {
-      // For any other inline element (span, a, etc.) recurse via text()
       const t = $(node).text().trim();
       if (t) parts.push(t);
     }
   });
-
   return parts.join(" ").replace(/\s+/g, " ").trim();
 }
 
@@ -146,7 +158,8 @@ async function fetchRenderedHtml(url) {
 }
 
 // ── HTML table → row-array parser ──────────────────────────────────────────────
-// Uses cellText() instead of .text() so img alt/src values are included.
+// Uses cellText() for all cells so img alt/src values are captured.
+// Player name cleaning happens later in the normalizers via playerNameFromCell().
 
 function parseHtmlTable($, tableEl) {
   const rows = [];
@@ -160,13 +173,32 @@ function parseHtmlTable($, tableEl) {
   return rows;
 }
 
+// ── Rich table parser — for normalizers that need per-cell cheerio access ────────
+// Returns rows as arrays of cheerio cell elements (not text strings),
+// so normalizers can call playerNameFromCell() on the name column
+// and cellText() on the game column independently.
+
+function parseHtmlTableRich($, tableEl) {
+  const rows = [];
+  $(tableEl).find("tr").each((_, tr) => {
+    const cells = [];
+    $(tr).find("th, td").each((_, cell) => {
+      cells.push(cell);
+    });
+    if (cells.length) rows.push(cells);
+  });
+  return rows;
+}
+
 async function scrapeTablesFromUrl(url) {
   const html = await fetchRenderedHtml(url);
   const $ = cheerio.load(html);
   const tables = [];
+  // Store both the text rows (for raw today pages) and the rich rows (for normalizers)
   $("table").each((_, tableEl) => {
-    const rows = parseHtmlTable($, tableEl);
-    if (rows.length > 1) tables.push(rows);
+    const textRows = parseHtmlTable($, tableEl);
+    const richRows = parseHtmlTableRich($, tableEl);
+    if (textRows.length > 1) tables.push({ textRows, richRows, $ });
   });
   return tables;
 }
@@ -183,15 +215,16 @@ function findCol(header, matchers) {
 }
 
 // ── BVP normalizer ────────────────────────────────────────────────────────────
+// Uses rich rows so the name cell uses playerNameFromCell() (name only)
+// and the game cell uses cellText() (img alt included).
 
 function normalizeBvpTables(tables) {
   const seen = new Set();
   const out = [];
 
-  for (const table of tables) {
-    if (!table || table.length < 2) continue;
-    const rawHeader = table[0];
-    const header = rawHeader.map((h) => h.toLowerCase().trim());
+  for (const { textRows, richRows, $ } of tables) {
+    if (!textRows || textRows.length < 2) continue;
+    const header = textRows[0].map((h) => h.toLowerCase().trim());
 
     const iName = findCol(header, [
       "batter", "player", "hitter", "name",
@@ -212,29 +245,35 @@ function normalizeBvpTables(tables) {
     const iHh  = findCol(header, ["hh%", "hh", "hard hit%", "hard hit", (h) => h.includes("hh") || h.includes("hard hit")]);
     const iHrf = findCol(header, ["hrf", "hr/f", "hr f", "hrfb", "hr f%", (h) => h.startsWith("hrf") || h.startsWith("hr/f") || h.startsWith("hr f")]);
 
-    console.log(`[fic] BVP table (${table.length - 1} data rows): name:${iName} game:${iGame} ab:${iAb} qab:${iQab} hh:${iHh} hrf:${iHrf}`);
+    console.log(`[fic] BVP table (${textRows.length - 1} rows): name:${iName} game:${iGame} ab:${iAb} qab:${iQab} hh:${iHh} hrf:${iHrf}`);
 
-    for (const row of table.slice(1)) {
-      const rawName = row[iName] || "";
+    // Skip header row in richRows (index 0)
+    for (let i = 1; i < richRows.length; i++) {
+      const richRow = richRows[i];
+      const textRow = textRows[i];
+
+      // Extract clean player name from the cell element
+      const rawName = playerNameFromCell($, richRow[iName]);
       if (!rawName) continue;
 
       const normalized = normalizeName(rawName);
       if (!normalized) continue;
 
       const statCols = [
-        iAb  >= 0 ? (row[iAb]  || "") : "",
-        iQab >= 0 ? (row[iQab] || "") : "",
-        iHh  >= 0 ? (row[iHh]  || "") : "",
-        iHrf >= 0 ? (row[iHrf] || "") : "",
+        iAb  >= 0 ? (textRow[iAb]  || "") : "",
+        iQab >= 0 ? (textRow[iQab] || "") : "",
+        iHh  >= 0 ? (textRow[iHh]  || "") : "",
+        iHrf >= 0 ? (textRow[iHrf] || "") : "",
       ];
 
-      const gameRaw = iGame >= 0 ? (row[iGame] || "") : "";
+      // Extract game cell with img alt support
+      const gameRaw = iGame >= 0 ? cellText($, richRow[iGame]) : "";
       const teams = teamsFromGame(gameRaw);
       console.log(`[fic] BVP: "${normalized}" game:"${gameRaw}" teams:[${teams.join(",")}]`);
 
       const keys = [
         ...teams.map((t) => `${t}:${normalized}`),
-        normalized, // name-only fallback always stored
+        normalized, // name-only fallback
       ];
 
       for (const key of keys) {
@@ -245,7 +284,7 @@ function normalizeBvpTables(tables) {
     }
   }
 
-  console.log(`[fic] BVP normalized: ${out.length} keys across all players/tables`);
+  console.log(`[fic] BVP normalized: ${out.length} keys`);
   return out;
 }
 
@@ -255,10 +294,9 @@ function normalizeSbTables(tables) {
   const seen = new Set();
   const out = [];
 
-  for (const table of tables) {
-    if (!table || table.length < 2) continue;
-    const rawHeader = table[0];
-    const header = rawHeader.map((h) => h.toLowerCase().trim());
+  for (const { textRows, richRows, $ } of tables) {
+    if (!textRows || textRows.length < 2) continue;
+    const header = textRows[0].map((h) => h.toLowerCase().trim());
 
     const iName = findCol(header, [
       "player", "batter", "hitter", "name", "runner",
@@ -283,17 +321,20 @@ function normalizeSbTables(tables) {
       continue;
     }
 
-    console.log(`[fic] SB table (${table.length - 1} data rows): name:${iName} game:${iGame} sb:${iSb}`);
+    console.log(`[fic] SB table (${textRows.length - 1} rows): name:${iName} game:${iGame} sb:${iSb}`);
 
-    for (const row of table.slice(1)) {
-      const rawName = row[iName] || "";
+    for (let i = 1; i < richRows.length; i++) {
+      const richRow = richRows[i];
+      const textRow = textRows[i];
+
+      const rawName = playerNameFromCell($, richRow[iName]);
       if (!rawName) continue;
 
       const normalized = normalizeName(rawName);
       if (!normalized) continue;
 
-      const sbVal = row[iSb] || "";
-      const gameRaw = iGame >= 0 ? (row[iGame] || "") : "";
+      const sbVal = textRow[iSb] || "";
+      const gameRaw = iGame >= 0 ? cellText($, richRow[iGame]) : "";
       const teams = teamsFromGame(gameRaw);
 
       const keys = [
@@ -309,7 +350,7 @@ function normalizeSbTables(tables) {
     }
   }
 
-  console.log(`[fic] SB normalized: ${out.length} keys across all players/tables`);
+  console.log(`[fic] SB normalized: ${out.length} keys`);
   return out;
 }
 
@@ -352,23 +393,25 @@ async function writeRawTablePageToNotion(pageId, label, date, tables, sourceUrl)
     `Last synced: ${ts} MT`,
     `Source: ${sourceUrl}`,
   ];
-  if (!tables || tables.length === 0) {
+  // Use textRows for raw today pages
+  const textTables = tables.map((t) => t.textRows);
+  if (!textTables || textTables.length === 0) {
     await overwritePageWithTable(pageId, headerLines, ["(no data)"], []);
     return;
   }
-  if (tables.length === 1) {
-    const [header, ...dataRows] = tables[0];
+  if (textTables.length === 1) {
+    const [header, ...dataRows] = textTables[0];
     await overwritePageWithTable(pageId, headerLines, header, dataRows);
   } else {
-    const maxCols = Math.max(...tables.map((t) => (t[0] || []).length));
+    const maxCols = Math.max(...textTables.map((t) => (t[0] || []).length));
     function padRow(row, len) {
       const r = [...row];
       while (r.length < len) r.push("");
       return r;
     }
-    const unifiedHeader = padRow(tables[0][0], maxCols);
+    const unifiedHeader = padRow(textTables[0][0], maxCols);
     const allDataRows = [];
-    tables.forEach((tableRows, idx) => {
+    textTables.forEach((tableRows, idx) => {
       const [, ...dataRows] = tableRows;
       if (idx > 0) {
         allDataRows.push(padRow([], maxCols));
@@ -388,7 +431,7 @@ export async function runBvpTodaySync() {
   const tables = await scrapeTablesFromUrl(url);
   await writeRawTablePageToNotion(FIC_BVP_TODAY_PAGE_ID, "Batter vs Pitcher — Today", date, tables, url);
   await logRun({ name: `FIC BvP Today (${date}) — ${new Date().toISOString()}` });
-  return { date, tables: tables.length, rows: tables.reduce((s, t) => s + t.length, 0) };
+  return { date, tables: tables.length, rows: tables.reduce((s, t) => s + t.textRows.length, 0) };
 }
 
 export async function runBvpTomorrowSync() {
@@ -414,7 +457,7 @@ export async function runSbTodaySync() {
   const tables = await scrapeTablesFromUrl(url);
   await writeRawTablePageToNotion(FIC_SB_TODAY_PAGE_ID, "Steal Probability — Today", date, tables, url);
   await logRun({ name: `FIC SB Today (${date}) — ${new Date().toISOString()}` });
-  return { date, tables: tables.length, rows: tables.reduce((s, t) => s + t.length, 0) };
+  return { date, tables: tables.length, rows: tables.reduce((s, t) => s + t.textRows.length, 0) };
 }
 
 export async function runSbTomorrowSync() {
