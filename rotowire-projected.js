@@ -10,9 +10,8 @@
 //   BVP:  Player | #AB | QAB% | HH% | HRF
 //   SB:   Player | SB%
 //
-// FIC stores player keys as "team:normalizedname" (e.g. "bos:m betts").
-// lookupMapWithTeam() tries "team:initial last" first, then "team:full name",
-// then falls back to name-only variants for backward compatibility.
+// FIC stores player keys as name-only (e.g. "m betts").
+// lookupMap() tries full name first, then initial+last fallback.
 
 import axios from "axios";
 import { Client as NotionClient } from "@notionhq/client";
@@ -42,8 +41,6 @@ const ROTOWIRE_TOMORROW_URL =
 
 // ---------------------------------------------------------------------------
 // NAME NORMALIZATION
-// Strips diacritics, punctuation (Jr., accents), lowercases, collapses spaces.
-// Must match the normalizeName() in fantasyinfocentral.js exactly.
 // ---------------------------------------------------------------------------
 
 function normalizeName(name) {
@@ -58,8 +55,6 @@ function normalizeName(name) {
 
 // ---------------------------------------------------------------------------
 // INITIAL+LAST KEY
-// Converts a normalized full name ("mookie betts") → abbreviated key ("m betts")
-// to match FIC's storage format.
 // ---------------------------------------------------------------------------
 
 function initialLastKey(normalizedFullName) {
@@ -69,8 +64,7 @@ function initialLastKey(normalizedFullName) {
 }
 
 // ---------------------------------------------------------------------------
-// MAP LOOKUP — name-only (FA set, OPS map)
-// Full name first, then initial+last fallback.
+// MAP LOOKUP — name-only
 // ---------------------------------------------------------------------------
 
 function lookupMap(map, normalizedFullName) {
@@ -85,12 +79,7 @@ function hasInSet(set, normalizedFullName) {
 }
 
 // ---------------------------------------------------------------------------
-// TEAM-QUALIFIED MAP LOOKUP — BVP + SB maps
-// FIC keys are stored as "team:normalizedname" (e.g. "bos:m betts").
-// Try order:
-//   1. "team:initial last"   ← most likely FIC format
-//   2. "team:full name"      ← in case FIC stored full name
-//   3. name-only fallback    ← backward compat / missing game column
+// TEAM-QUALIFIED MAP LOOKUP — kept for SB map compat; falls back to name-only
 // ---------------------------------------------------------------------------
 
 function lookupMapWithTeam(map, normalizedFullName, team) {
@@ -101,7 +90,6 @@ function lookupMapWithTeam(map, normalizedFullName, team) {
     const fullKey = `${t}:${normalizedFullName}`;
     if (map[fullKey] !== undefined) return map[fullKey];
   }
-  // Fall back to name-only for backward compat / missing team data
   return lookupMap(map, normalizedFullName);
 }
 
@@ -130,7 +118,6 @@ function parseFloat2(val) {
 
 // ---------------------------------------------------------------------------
 // NOTION TABLE READER
-// Reads the largest table block from a Notion page.
 // ---------------------------------------------------------------------------
 
 async function readNotionTableRows(pageId) {
@@ -182,7 +169,6 @@ async function readNotionTableRows(pageId) {
 // ---------------------------------------------------------------------------
 // BVP MAP
 // Fixed schema: Player | #AB | QAB% | HH% | HRF
-// Keys are "team:normalizedname" (e.g. "bos:m betts") written by fantasyinfocentral.js.
 // ---------------------------------------------------------------------------
 
 async function fetchBvpMapFromNotion() {
@@ -227,7 +213,6 @@ async function fetchBvpMapFromNotion() {
 // ---------------------------------------------------------------------------
 // SB MAP
 // Fixed schema: Player | SB%
-// Keys are "team:normalizedname" (e.g. "bos:m betts") written by fantasyinfocentral.js.
 // ---------------------------------------------------------------------------
 
 async function fetchSbMapFromNotion() {
@@ -343,7 +328,7 @@ async function fetchLast7OpsMap() {
 }
 
 // ---------------------------------------------------------------------------
-// BROWSERLESS HELPER  (Rotowire only)
+// BROWSERLESS HELPER
 // ---------------------------------------------------------------------------
 
 async function getRenderedHtml() {
@@ -462,13 +447,11 @@ async function scrapeTomorrowLineups() {
 
 // ---------------------------------------------------------------------------
 // ENRICH PLAYERS
-// team is the 3-letter Rotowire abbreviation (e.g. "BOS", "NYY").
-// lookupMapWithTeam tries team-qualified keys first, falls back to name-only.
 // ---------------------------------------------------------------------------
 
 function enrichPlayer(player, team, faSet, opsMap, bvpMap, sbMap) {
   const key = normalizeName(player.name);
-  const bvp = lookupMapWithTeam(bvpMap, key, team) || null;
+  const bvp = lookupMap(bvpMap, key) || null;
   return {
     ...player,
     isFreeAgent: hasInSet(faSet, key),
@@ -483,12 +466,9 @@ function enrichPlayer(player, team, faSet, opsMap, bvpMap, sbMap) {
 
 // ---------------------------------------------------------------------------
 // FREE AGENT SUMMARY
-// Collects all enriched FA batters appearing in tomorrow's lineups and builds
-// four ranked top-5 lists for the AI agent summary block.
 // ---------------------------------------------------------------------------
 
 function buildFaSummary(games) {
-  // Collect all FA players from every lineup, deduplicated by name
   const seen = new Set();
   const fas = [];
   for (const game of games) {
@@ -505,39 +485,44 @@ function buildFaSummary(games) {
 
   if (!fas.length) return "(no free agents found in tomorrow\'s projected lineups)";
 
-  // ── Top 5 by L7 OPS ────────────────────────────────────────────────────────
+  // Top 5 by L7 OPS
   const byOps = fas
     .filter((p) => parseFloat2(p.ops7) !== null)
     .sort((a, b) => parseFloat2(b.ops7) - parseFloat2(a.ops7))
     .slice(0, 5);
 
-  // ── Top 5 by QAB% (min 5 ABs) ─────────────────────────────────────────────
+  // Top 5 by QAB% (min 5 ABs vs SP)
   const byQab = fas
     .filter((p) => parseFloat2(p.bvpAb) !== null && parseFloat2(p.bvpAb) >= 5 && parseFloat2(p.bvpQab) !== null)
     .sort((a, b) => parseFloat2(b.bvpQab) - parseFloat2(a.bvpQab))
     .slice(0, 5);
 
-  // ── Top 5 by SB% ──────────────────────────────────────────────────────────
+  // Top 5 by SB%
   const bySb = fas
     .filter((p) => parseFloat2(p.sbPct) !== null)
     .sort((a, b) => parseFloat2(b.sbPct) - parseFloat2(a.sbPct))
     .slice(0, 5);
 
-  // ── Top 5 by HRF (tiebreak: lower batting order = better) ─────────────────
+  // Top 5 by HRF (tiebreak: lower batting order = better)
   const byHrf = fas
     .filter((p) => parseFloat2(p.bvpHrf) !== null)
     .sort((a, b) => {
       const hrfDiff = parseFloat2(b.bvpHrf) - parseFloat2(a.bvpHrf);
       if (hrfDiff !== 0) return hrfDiff;
-      return (a.order ?? 99) - (b.order ?? 99); // lower order = earlier in lineup = better
+      return (a.order ?? 99) - (b.order ?? 99);
     })
     .slice(0, 5);
 
+  // ── Formatters ────────────────────────────────────────────────────────────
   function fmtOps(p) {
     return `${p.name} (L7 OPS: ${p.ops7}${p.bvpAb ? `, ${p.bvpAb} AB vs SP` : ""})`;
   }
+  // QAB% → HH% → # ABs
   function fmtQab(p) {
-    return `${p.name} (QAB%: ${p.bvpQab}, ${p.bvpAb} AB)`;
+    const parts = [`QAB%: ${p.bvpQab}`];
+    if (p.bvpHh) parts.push(`HH%: ${p.bvpHh}`);
+    parts.push(`${p.bvpAb} AB`);
+    return `${p.name} (${parts.join(", ")})`;
   }
   function fmtSb(p) {
     return `${p.name} (SB%: ${p.sbPct})`;
@@ -552,39 +537,39 @@ function buildFaSummary(games) {
   }
 
   const lines = [
-    "━".repeat(60),
-    "🟢 FREE AGENT WAIVER WIRE SUMMARY — TOP PICKUPS FOR TOMORROW",
-    "━".repeat(60),
+    "\u2501".repeat(60),
+    "\uD83D\uDFE2 FREE AGENT WAIVER WIRE SUMMARY \u2014 TOP PICKUPS FOR TOMORROW",
+    "\u2501".repeat(60),
     "",
     renderList(
-      "📈 Top 5 by L7 OPS (hottest bats):",
+      "\uD83D\uDCC8 Top 5 by L7 OPS (hottest bats):",
       byOps,
       fmtOps,
       "(no FA with L7 OPS data in tomorrow\'s lineups)"
     ),
     "",
     renderList(
-      "🎯 Top 5 by QAB% vs Tomorrow's SP (min 5 AB):",
+      "\uD83C\uDFAF Top 5 by QAB% vs Tomorrow\u2019s SP (min 5 AB):",
       byQab,
       fmtQab,
       "(no FA with 5+ AB vs tomorrow\'s SP)"
     ),
     "",
     renderList(
-      "🏃 Top 5 by SB% (steal probability):",
+      "\uD83C\uDFC3 Top 5 by SB% (steal probability):",
       bySb,
       fmtSb,
       "(no FA with SB% data in tomorrow\'s lineups)"
     ),
     "",
     renderList(
-      "💣 Top 5 by HRF vs Tomorrow's SP (tiebreak: lineup spot):",
+      "\uD83D\uDCA3 Top 5 by HRF vs Tomorrow\u2019s SP (tiebreak: lineup spot):",
       byHrf,
       fmtHrf,
       "(no FA with HRF data in tomorrow\'s lineups)"
     ),
     "",
-    "━".repeat(60),
+    "\u2501".repeat(60),
     "",
   ];
 
@@ -592,20 +577,20 @@ function buildFaSummary(games) {
 }
 
 // ---------------------------------------------------------------------------
-// FORMAT
+// FORMAT PLAYER LINE
+// BVP order: #AB → QAB% → HH% → HRF
 // ---------------------------------------------------------------------------
 
 function formatPlayerLine(p) {
   const fa  = p.isFreeAgent ? " \uD83D\uDFE2FA" : "";
   const ops = p.ops7 ? ` | L7 OPS: ${p.ops7}` : "";
-  const bvp = (p.bvpAb || p.bvpQab || p.bvpHh || p.bvpHrf)
-    ? ` | BVP: ${[
-        p.bvpAb  ? `${p.bvpAb} AB`    : "",
-        p.bvpQab ? `QAB% ${p.bvpQab}` : "",
-        p.bvpHh  ? `HH% ${p.bvpHh}`   : "",
-        p.bvpHrf ? `HRF ${p.bvpHrf}`  : "",
-      ].filter(Boolean).join(", ")}`
-    : "";
+  const bvpParts = [
+    p.bvpAb  ? `${p.bvpAb} AB`    : "",
+    p.bvpQab ? `QAB% ${p.bvpQab}` : "",
+    p.bvpHh  ? `HH% ${p.bvpHh}`   : "",
+    p.bvpHrf ? `HRF ${p.bvpHrf}`  : "",
+  ].filter(Boolean);
+  const bvp = bvpParts.length ? ` | BVP: ${bvpParts.join(", ")}` : "";
   const sb = p.sbPct ? ` | SB% ${p.sbPct}` : "";
   return `  ${String(p.order).padStart(2)}. ${p.position.padEnd(3)} ${p.name}${p.bats ? ` (${p.bats})` : ""}${fa}${ops}${bvp}${sb}`;
 }
@@ -618,7 +603,7 @@ function formatLineupSide(label, lineup) {
   const playerLines = lineup.players.length
     ? lineup.players.map(formatPlayerLine)
     : ["  (no lineup posted)"];
-  return [`${label} — ${statusLabel}`, spLine, ...playerLines].join("\n");
+  return [`${label} \u2014 ${statusLabel}`, spLine, ...playerLines].join("\n");
 }
 
 function formatSnapshot(snapshot) {
@@ -642,9 +627,8 @@ function formatSnapshot(snapshot) {
     `MLB Projected Lineups \u2014 ${dateStr}`,
     `(pulled ${ts} MT)`,
     `${snapshot.games.length} games scheduled`,
-    `Legend: \uD83D\uDFE2FA = Free Agent | L7 OPS = Last 7 days | BVP = vs tomorrow's pitcher (#AB/QAB%/HH%/HRF) | SB% = steal probability`,
+    `Legend: \uD83D\uDFE2FA = Free Agent | L7 OPS = Last 7 days | BVP = vs tomorrow's pitcher (#AB, QAB%, HH%, HRF) | SB% = steal probability`,
     "",
-    // FA summary block inserted before game-by-game lineups
     snapshot.faSummary || "",
   ];
 
@@ -734,7 +718,6 @@ async function writePageContent(pageId, markdown) {
 export async function runProjectedLineupSync() {
   console.log("[projected-lineup] Starting enriched tomorrow lineup sync...");
 
-  // 1) Scrape Rotowire (critical path — if this fails, abort)
   const snapshot = await scrapeTomorrowLineups();
   if (!snapshot.games.length) {
     console.warn("[projected-lineup] No games found — nothing written to Notion.");
@@ -742,7 +725,6 @@ export async function runProjectedLineupSync() {
   }
   console.log(`[projected-lineup] Found ${snapshot.games.length} games from Rotowire.`);
 
-  // 2) Fetch enrichment data in parallel — all independent, gracefully degraded
   console.log("[projected-lineup] Reading FA list, L7 OPS, BVP, and SB% in parallel...");
   const [faSet, opsMap, bvpMap, sbMap] = await Promise.all([
     fetchFreeAgentNameSet().catch((e) => {
@@ -759,7 +741,6 @@ export async function runProjectedLineupSync() {
     }),
   ]);
 
-  // 3) Enrich each batter in every lineup, passing the team abbreviation
   for (const game of snapshot.games) {
     game.awayLineup.players = game.awayLineup.players.map((p) =>
       enrichPlayer(p, game.awayTeam, faSet, opsMap, bvpMap, sbMap)
@@ -769,10 +750,8 @@ export async function runProjectedLineupSync() {
     );
   }
 
-  // 4) Build FA waiver wire summary from enriched data
   snapshot.faSummary = buildFaSummary(snapshot.games);
 
-  // 5) Write enriched output to Notion
   console.log(`[projected-lineup] Writing to Notion page ${NOTION_PROJECTED_LINEUP_PAGE_ID}...`);
   const markdown = formatSnapshot(snapshot);
   await writePageContent(NOTION_PROJECTED_LINEUP_PAGE_ID, markdown);
