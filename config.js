@@ -38,8 +38,9 @@ export const FIC_SB_TODAY_PAGE_ID      = process.env.FIC_SB_TODAY_PAGE_ID;
 export const FIC_SB_TOMORROW_PAGE_ID   = process.env.FIC_SB_TOMORROW_PAGE_ID;
 
 // ── MLB Schedule ─────────────────────────────────────────────────────────────────────────
-export const MLB_SCHEDULE_TODAY_PAGE_ID = process.env.MLB_SCHEDULE_TODAY_PAGE_ID;
-export const MLB_SCHEDULE_WEEK_PAGE_ID  = process.env.MLB_SCHEDULE_WEEK_PAGE_ID;
+export const MLB_SCHEDULE_TODAY_PAGE_ID    = process.env.MLB_SCHEDULE_TODAY_PAGE_ID;
+export const MLB_SCHEDULE_TOMORROW_PAGE_ID = process.env.MLB_SCHEDULE_TOMORROW_PAGE_ID;
+export const MLB_SCHEDULE_WEEK_PAGE_ID     = process.env.MLB_SCHEDULE_WEEK_PAGE_ID;
 
 export function requireEnv(name, val) {
 	if (!val) throw new Error(`Missing env var ${name}`);

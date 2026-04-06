@@ -1,15 +1,16 @@
 // mlbschedule.js
-// Fetches the MLB schedule for today (or a full week) from the MLB Stats API
+// Fetches the MLB schedule for today, tomorrow, or a full week from the MLB Stats API
 // and overwrites the corresponding Notion pages with a clean game-by-game table.
 //
 // MLB Stats API (free, no auth): https://statsapi.mlb.com/api/v1/schedule
-//   ?sportId=1&date=YYYY-MM-DD                   → single day
+//   ?sportId=1&date=YYYY-MM-DD                        → single day
 //   ?sportId=1&startDate=YYYY-MM-DD&endDate=YYYY-MM-DD → date range
 
 import axios from "axios";
 import {
   NOTION_TOKEN,
   MLB_SCHEDULE_TODAY_PAGE_ID,
+  MLB_SCHEDULE_TOMORROW_PAGE_ID,
   MLB_SCHEDULE_WEEK_PAGE_ID,
   requireEnv,
 } from "./config.js";
@@ -18,6 +19,7 @@ import { overwritePageWithTable } from "./notiontables.js";
 
 requireEnv("NOTION_TOKEN", NOTION_TOKEN);
 requireEnv("MLB_SCHEDULE_TODAY_PAGE_ID", MLB_SCHEDULE_TODAY_PAGE_ID);
+requireEnv("MLB_SCHEDULE_TOMORROW_PAGE_ID", MLB_SCHEDULE_TOMORROW_PAGE_ID);
 requireEnv("MLB_SCHEDULE_WEEK_PAGE_ID", MLB_SCHEDULE_WEEK_PAGE_ID);
 
 const MLB_API_BASE = "https://statsapi.mlb.com/api/v1/schedule";
@@ -90,7 +92,7 @@ function parseScheduleToRows(data) {
 
 // ── Write to Notion ───────────────────────────────────────────────────────────
 
-async function writeScheduleToNotion(pageId, label, headerLines, rows) {
+async function writeScheduleToNotion(pageId, headerLines, rows) {
   const columns = ["Date", "Time (MT)", "Away", "Home", "Venue", "Status"];
 
   if (rows.length === 0) {
@@ -103,8 +105,8 @@ async function writeScheduleToNotion(pageId, label, headerLines, rows) {
 // ── Public sync functions ─────────────────────────────────────────────────────
 
 export async function runMlbScheduleTodaySync() {
-  const date = getMtDate(0);
-  const ts   = getMtTimestamp();
+  const date      = getMtDate(0);
+  const ts        = getMtTimestamp();
   const sourceUrl = `${MLB_API_BASE}?sportId=1&date=${date}`;
 
   const data = await fetchSchedule({ date });
@@ -116,8 +118,28 @@ export async function runMlbScheduleTodaySync() {
     `Source: ${sourceUrl}`,
   ];
 
-  await writeScheduleToNotion(MLB_SCHEDULE_TODAY_PAGE_ID, "MLB Schedule Today", headerLines, rows);
+  await writeScheduleToNotion(MLB_SCHEDULE_TODAY_PAGE_ID, headerLines, rows);
   await logRun({ name: `MLB Schedule Today (${date}) — ${new Date().toISOString()}` });
+
+  return { date, games: rows.length };
+}
+
+export async function runMlbScheduleTomorrowSync() {
+  const date      = getMtDate(1);
+  const ts        = getMtTimestamp();
+  const sourceUrl = `${MLB_API_BASE}?sportId=1&date=${date}`;
+
+  const data = await fetchSchedule({ date });
+  const rows = parseScheduleToRows(data);
+
+  const headerLines = [
+    `MLB Schedule — Tomorrow (${date})`,
+    `Last synced: ${ts} MT`,
+    `Source: ${sourceUrl}`,
+  ];
+
+  await writeScheduleToNotion(MLB_SCHEDULE_TOMORROW_PAGE_ID, headerLines, rows);
+  await logRun({ name: `MLB Schedule Tomorrow (${date}) — ${new Date().toISOString()}` });
 
   return { date, games: rows.length };
 }
@@ -137,7 +159,7 @@ export async function runMlbScheduleWeekSync() {
     `Source: ${sourceUrl}`,
   ];
 
-  await writeScheduleToNotion(MLB_SCHEDULE_WEEK_PAGE_ID, "MLB Schedule Week", headerLines, rows);
+  await writeScheduleToNotion(MLB_SCHEDULE_WEEK_PAGE_ID, headerLines, rows);
   await logRun({ name: `MLB Schedule Week (${startDate}–${endDate}) — ${new Date().toISOString()}` });
 
   return { startDate, endDate, games: rows.length };
