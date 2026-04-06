@@ -123,6 +123,11 @@ function getAttr(tagHtml, attrName) {
   return tagHtml.match(re)?.[1] ?? null;
 }
 
+function parseFloat2(val) {
+  const n = parseFloat(String(val).replace(/[^0-9.-]/g, ""));
+  return isNaN(n) ? null : n;
+}
+
 // ---------------------------------------------------------------------------
 // NOTION TABLE READER
 // Reads the largest table block from a Notion page.
@@ -477,11 +482,121 @@ function enrichPlayer(player, team, faSet, opsMap, bvpMap, sbMap) {
 }
 
 // ---------------------------------------------------------------------------
+// FREE AGENT SUMMARY
+// Collects all enriched FA batters appearing in tomorrow's lineups and builds
+// four ranked top-5 lists for the AI agent summary block.
+// ---------------------------------------------------------------------------
+
+function buildFaSummary(games) {
+  // Collect all FA players from every lineup, deduplicated by name
+  const seen = new Set();
+  const fas = [];
+  for (const game of games) {
+    for (const side of [game.awayLineup, game.homeLineup]) {
+      for (const p of side.players) {
+        if (!p.isFreeAgent) continue;
+        const key = normalizeName(p.name);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        fas.push(p);
+      }
+    }
+  }
+
+  if (!fas.length) return "(no free agents found in tomorrow\'s projected lineups)";
+
+  // ── Top 5 by L7 OPS ────────────────────────────────────────────────────────
+  const byOps = fas
+    .filter((p) => parseFloat2(p.ops7) !== null)
+    .sort((a, b) => parseFloat2(b.ops7) - parseFloat2(a.ops7))
+    .slice(0, 5);
+
+  // ── Top 5 by QAB% (min 5 ABs) ─────────────────────────────────────────────
+  const byQab = fas
+    .filter((p) => parseFloat2(p.bvpAb) !== null && parseFloat2(p.bvpAb) >= 5 && parseFloat2(p.bvpQab) !== null)
+    .sort((a, b) => parseFloat2(b.bvpQab) - parseFloat2(a.bvpQab))
+    .slice(0, 5);
+
+  // ── Top 5 by SB% ──────────────────────────────────────────────────────────
+  const bySb = fas
+    .filter((p) => parseFloat2(p.sbPct) !== null)
+    .sort((a, b) => parseFloat2(b.sbPct) - parseFloat2(a.sbPct))
+    .slice(0, 5);
+
+  // ── Top 5 by HRF (tiebreak: lower batting order = better) ─────────────────
+  const byHrf = fas
+    .filter((p) => parseFloat2(p.bvpHrf) !== null)
+    .sort((a, b) => {
+      const hrfDiff = parseFloat2(b.bvpHrf) - parseFloat2(a.bvpHrf);
+      if (hrfDiff !== 0) return hrfDiff;
+      return (a.order ?? 99) - (b.order ?? 99); // lower order = earlier in lineup = better
+    })
+    .slice(0, 5);
+
+  function fmtOps(p) {
+    return `${p.name} (L7 OPS: ${p.ops7}${p.bvpAb ? `, ${p.bvpAb} AB vs SP` : ""})`;
+  }
+  function fmtQab(p) {
+    return `${p.name} (QAB%: ${p.bvpQab}, ${p.bvpAb} AB)`;
+  }
+  function fmtSb(p) {
+    return `${p.name} (SB%: ${p.sbPct})`;
+  }
+  function fmtHrf(p) {
+    return `${p.name} (HRF: ${p.bvpHrf}, #${p.order} in order${p.bvpAb ? `, ${p.bvpAb} AB` : ""})`;
+  }
+
+  function renderList(label, items, fmtFn, emptyMsg) {
+    if (!items.length) return `${label}\n  ${emptyMsg}`;
+    return [label, ...items.map((p, i) => `  ${i + 1}. ${fmtFn(p)}`)].join("\n");
+  }
+
+  const lines = [
+    "━".repeat(60),
+    "🟢 FREE AGENT WAIVER WIRE SUMMARY — TOP PICKUPS FOR TOMORROW",
+    "━".repeat(60),
+    "",
+    renderList(
+      "📈 Top 5 by L7 OPS (hottest bats):",
+      byOps,
+      fmtOps,
+      "(no FA with L7 OPS data in tomorrow\'s lineups)"
+    ),
+    "",
+    renderList(
+      "🎯 Top 5 by QAB% vs Tomorrow's SP (min 5 AB):",
+      byQab,
+      fmtQab,
+      "(no FA with 5+ AB vs tomorrow\'s SP)"
+    ),
+    "",
+    renderList(
+      "🏃 Top 5 by SB% (steal probability):",
+      bySb,
+      fmtSb,
+      "(no FA with SB% data in tomorrow\'s lineups)"
+    ),
+    "",
+    renderList(
+      "💣 Top 5 by HRF vs Tomorrow's SP (tiebreak: lineup spot):",
+      byHrf,
+      fmtHrf,
+      "(no FA with HRF data in tomorrow\'s lineups)"
+    ),
+    "",
+    "━".repeat(60),
+    "",
+  ];
+
+  return lines.join("\n");
+}
+
+// ---------------------------------------------------------------------------
 // FORMAT
 // ---------------------------------------------------------------------------
 
 function formatPlayerLine(p) {
-  const fa  = p.isFreeAgent ? " 🟢FA" : "";
+  const fa  = p.isFreeAgent ? " \uD83D\uDFE2FA" : "";
   const ops = p.ops7 ? ` | L7 OPS: ${p.ops7}` : "";
   const bvp = (p.bvpAb || p.bvpQab || p.bvpHh || p.bvpHrf)
     ? ` | BVP: ${[
@@ -496,7 +611,7 @@ function formatPlayerLine(p) {
 }
 
 function formatLineupSide(label, lineup) {
-  const statusLabel = lineup.status === "confirmed" ? "✅ CONFIRMED" : "🕒 PROJECTED";
+  const statusLabel = lineup.status === "confirmed" ? "\u2705 CONFIRMED" : "\uD83D\uDD52 PROJECTED";
   const spLine = lineup.sp
     ? `  SP: ${lineup.sp.name}${lineup.sp.throws ? ` (${lineup.sp.throws})` : ""}`
     : "  SP: TBD";
@@ -524,20 +639,22 @@ function formatSnapshot(snapshot) {
   });
 
   const lines = [
-    `MLB Projected Lineups — ${dateStr}`,
+    `MLB Projected Lineups \u2014 ${dateStr}`,
     `(pulled ${ts} MT)`,
     `${snapshot.games.length} games scheduled`,
-    `Legend: 🟢FA = Free Agent | L7 OPS = Last 7 days | BVP = vs tomorrow's pitcher (#AB/QAB%/HH%/HRF) | SB% = steal probability`,
+    `Legend: \uD83D\uDFE2FA = Free Agent | L7 OPS = Last 7 days | BVP = vs tomorrow's pitcher (#AB/QAB%/HH%/HRF) | SB% = steal probability`,
     "",
+    // FA summary block inserted before game-by-game lineups
+    snapshot.faSummary || "",
   ];
 
   for (const game of snapshot.games) {
-    lines.push(`▶ ${game.awayTeam} @ ${game.homeTeam}  |  ${game.gameTime}`);
+    lines.push(`\u25B6 ${game.awayTeam} @ ${game.homeTeam}  |  ${game.gameTime}`);
     lines.push(formatLineupSide(game.awayTeam, game.awayLineup));
     lines.push("");
     lines.push(formatLineupSide(game.homeTeam, game.homeLineup));
     lines.push("");
-    lines.push("─".repeat(60));
+    lines.push("\u2500".repeat(60));
     lines.push("");
   }
 
@@ -652,7 +769,10 @@ export async function runProjectedLineupSync() {
     );
   }
 
-  // 4) Write enriched output to Notion
+  // 4) Build FA waiver wire summary from enriched data
+  snapshot.faSummary = buildFaSummary(snapshot.games);
+
+  // 5) Write enriched output to Notion
   console.log(`[projected-lineup] Writing to Notion page ${NOTION_PROJECTED_LINEUP_PAGE_ID}...`);
   const markdown = formatSnapshot(snapshot);
   await writePageContent(NOTION_PROJECTED_LINEUP_PAGE_ID, markdown);
