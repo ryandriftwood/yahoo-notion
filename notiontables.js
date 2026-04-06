@@ -5,7 +5,7 @@ requireEnv("NOTION_TOKEN", NOTION_TOKEN);
 
 const notion = new NotionClient({
   auth: NOTION_TOKEN,
-  // If you’ve pinned an API version, keep or add this:
+  // If you've pinned an API version, keep or add this:
   // notionVersion: "2026-03-11",
 });
 
@@ -23,7 +23,7 @@ async function listAllChildBlocks(blockId) {
     all.push(...resp.results);
 
     if (!resp.has_more) break;
-    cursor = resp.next_cursor; // correct pagination field
+    cursor = resp.next_cursor;
   }
 
   return all;
@@ -39,8 +39,6 @@ async function archiveBlocks(blocks) {
       batch.map((b) =>
         notion.blocks.update({
           block_id: b.id,
-          // For new API versions, archived is replaced by in_trash
-          // If you’re on an older version, you can switch this back to archived: true
           in_trash: true,
         })
       )
@@ -60,8 +58,6 @@ function rt(text) {
 }
 
 function makeTableBlock(columns, rowsChunk) {
-  // Notion limit: table children (rows) must be <= 100.
-  // We'll use 1 header row + up to 99 data rows per table.
   const tableRows = [];
 
   // Header row
@@ -107,10 +103,6 @@ export async function overwritePageWithTable(
   columns,
   rows
 ) {
-  // headerLines: string[]
-  // columns: string[]
-  // rows: Array<Array<string | number | null>>
-
   if (!pageId) {
     throw new Error("pageId is required");
   }
@@ -139,7 +131,6 @@ export async function overwritePageWithTable(
   for (let i = 0; i < total; i += chunkSize) {
     const chunk = rows.slice(i, i + chunkSize);
 
-    // Optional label before each table (helps when there are multiple)
     if (total > chunkSize) {
       children.push({
         object: "block",
@@ -154,14 +145,54 @@ export async function overwritePageWithTable(
 
     children.push(makeTableBlock(columns, chunk));
 
-    // Divider between tables
     if (i + chunkSize < total) {
       children.push({ object: "block", type: "divider", divider: {} });
     }
   }
 
-  // append (batch small; table blocks can be large)
   const batchSize = 10;
+  for (let i = 0; i < children.length; i += batchSize) {
+    await notion.blocks.children.append({
+      block_id: pageId,
+      children: children.slice(i, i + batchSize),
+    });
+  }
+}
+
+/**
+ * appendRankedListToPage
+ *
+ * Appends a divider, a heading, and a numbered list to an already-written page.
+ * Does NOT wipe existing content — call this AFTER overwritePageWithTable.
+ *
+ * @param {string}   pageId    - Notion page ID
+ * @param {string}   heading   - e.g. "PROJECTED RUNS RANKING — HIGH TO LOW"
+ * @param {string[]} items     - ordered strings, e.g. ["Los Angeles Dodgers — 5.4", ...]
+ */
+export async function appendRankedListToPage(pageId, heading, items) {
+  if (!pageId) throw new Error("pageId is required");
+
+  const children = [
+    // visual separator
+    { object: "block", type: "divider", divider: {} },
+    // bold heading so it's impossible to miss
+    {
+      object: "block",
+      type: "heading_2",
+      heading_2: { rich_text: rt(heading) },
+    },
+  ];
+
+  for (const item of items) {
+    children.push({
+      object: "block",
+      type: "numbered_list_item",
+      numbered_list_item: { rich_text: rt(item) },
+    });
+  }
+
+  // Notion append limit is 100 children per request
+  const batchSize = 50;
   for (let i = 0; i < children.length; i += batchSize) {
     await notion.blocks.children.append({
       block_id: pageId,
