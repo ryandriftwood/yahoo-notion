@@ -1,11 +1,10 @@
 // seasonstats.js
-import { YAHOO_LEAGUE_KEY, requireEnv, NOTION_SEASON_STATS_PAGE_ID } from "./config.js";
+import { YAHOO_LEAGUE_KEY, requireEnv } from "./config.js";
 import { yahooFantasyGetXml } from "./yahoo.js";
 import { parseStringPromise } from "xml2js";
-import { overwritePageWithTable } from "./notiontables.js";
+import { pool } from "./db.js";
 
 requireEnv("YAHOO_LEAGUE_KEY", YAHOO_LEAGUE_KEY);
-requireEnv("NOTION_SEASON_STATS_PAGE_ID", NOTION_SEASON_STATS_PAGE_ID);
 
 // Stat ID → column name mapping derived from league scoring settings
 // Batters:  7=R, 12=HR, 13=RBI, 16=SB, 55=OPS, 60=H/AB
@@ -15,7 +14,6 @@ const BATTER_STAT_NAMES  = ["R",  "HR",  "RBI", "SB",  "OPS",  "H/AB"];
 const PITCHER_STAT_IDS   = ["26", "27",  "28",  "50",  "57",   "85"];
 const PITCHER_STAT_NAMES = ["ERA","WHIP","SV",  "IP",  "K/9",  "QS"];
 
-// Combined ordered list for the table columns
 const ALL_STAT_IDS   = [...BATTER_STAT_IDS,   ...PITCHER_STAT_IDS];
 const ALL_STAT_NAMES = [...BATTER_STAT_NAMES, ...PITCHER_STAT_NAMES];
 
@@ -60,7 +58,6 @@ async function fetchPlayersByOverallRank({ target = 1000 }) {
 		const remaining = target - all.length;
 		const count = Math.min(pageSize, remaining);
 
-		// status=A returns ALL players (owned + FA + waivers)
 		const xml = await yahooFantasyGetXml(
 			`league/${YAHOO_LEAGUE_KEY}/players;status=A;sort=OR;start=${start};count=${count}`
 		);
@@ -95,6 +92,34 @@ function mergeStatsIntoPlayers(players, statsByKey) {
 	return players.map((p) => ({ ...p, statMap: m.get(p.player_key) || {} }));
 }
 
+async function upsertSeasonStats(merged) {
+	for (let i = 0; i < merged.length; i++) {
+		const p = merged[i];
+		if (!p.player_key) continue;
+		for (let j = 0; j < ALL_STAT_IDS.length; j++) {
+			const statId = ALL_STAT_IDS[j];
+			const statName = ALL_STAT_NAMES[j];
+			const statValue = p.statMap?.[statId] ?? "";
+			await pool.query(
+				`INSERT INTO player_season_stats
+					(player_key, player_id, full_name, mlb_team, positions, status, or_rank, stat_key, stat_value, updated_at)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+				ON CONFLICT (player_key, stat_key)
+				DO UPDATE SET
+					player_id  = EXCLUDED.player_id,
+					full_name  = EXCLUDED.full_name,
+					mlb_team   = EXCLUDED.mlb_team,
+					positions  = EXCLUDED.positions,
+					status     = EXCLUDED.status,
+					or_rank    = EXCLUDED.or_rank,
+					stat_value = EXCLUDED.stat_value,
+					updated_at = NOW()`,
+				[p.player_key, p.player_id, p.full, p.mlbTeam, p.positions, p.status, i + 1, statName, statValue]
+			);
+		}
+	}
+}
+
 export async function runSeasonStatsSync({ target = 1000 } = {}) {
 	const started = new Date().toISOString();
 
@@ -113,25 +138,7 @@ export async function runSeasonStatsSync({ target = 1000 } = {}) {
 	}
 
 	const merged = mergeStatsIntoPlayers(players, statsRows);
-
-	const columns = ["OR Rank", "Player", "Team", "Pos", "Status", "player_key", ...ALL_STAT_NAMES];
-
-	const rows = merged.map((p, idx) => [
-		String(idx + 1),
-		p.full,
-		p.mlbTeam,
-		p.positions,
-		p.status,
-		p.player_key,
-		...ALL_STAT_IDS.map((id) => p.statMap?.[id] ?? ""),
-	]);
-
-	await overwritePageWithTable(
-		NOTION_SEASON_STATS_PAGE_ID,
-		[`Season stats — Top ${target} by OR (all players)`, `Last synced: ${started}`],
-		columns,
-		rows
-	);
+	await upsertSeasonStats(merged);
 
 	return { started, count: merged.length };
 }
