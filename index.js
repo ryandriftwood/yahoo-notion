@@ -50,13 +50,13 @@ app.get("/yahoo/oauth2/status", async (req, res) => {
 	return res.json({ hasAccessToken: Boolean(t.access_token), hasRefreshToken: Boolean(t.refresh_token), expiresAt: t.expires_at });
 });
 
-app.post("/sync", async (req, res) => {
-	try {
-		const result = await runSync();
-		res.json({ ok: true, result });
-	} catch (e) {
-		res.status(500).json({ ok: false, error: String(e?.response?.data || e?.message || e) });
-	}
+// Fire-and-forget: respond 202 immediately so Render's 30s timeout
+// doesn't kill the connection mid-run (40+ sequential Yahoo API pages).
+app.post("/sync", (req, res) => {
+	res.status(202).json({ ok: true, message: "Sync started" });
+	runSync()
+		.then((result) => console.log("[sync] completed:", JSON.stringify(result)))
+		.catch((e) => console.error("[sync] failed:", e?.message || e));
 });
 
 app.post("/sync/seasonstats", seasonStatsRouteHandler());
