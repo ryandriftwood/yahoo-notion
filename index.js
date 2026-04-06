@@ -14,6 +14,7 @@ import {
   runSbTomorrowSync,
   runAllFicSyncs,
 } from "./fantasyinfocentral.js";
+import { runMlbScheduleTodaySync, runMlbScheduleWeekSync } from "./mlbschedule.js";
 
 const app = express();
 
@@ -149,6 +150,28 @@ app.post("/sync/fic/sb/tomorrow", async (req, res) => {
 app.post("/sync/fic/all", async (req, res) => {
 	try {
 		const result = await runAllFicSyncs();
+		res.json({ ok: true, result });
+	} catch (e) {
+		res.status(500).json({ ok: false, error: String(e?.message || e) });
+	}
+});
+
+// ── MLB Schedule ──────────────────────────────────────────────────────────────────────────
+
+// Today's games
+app.post("/sync/mlb/schedule/today", async (req, res) => {
+	try {
+		const result = await runMlbScheduleTodaySync();
+		res.json({ ok: true, result });
+	} catch (e) {
+		res.status(500).json({ ok: false, error: String(e?.message || e) });
+	}
+});
+
+// This week's games (today + 6 days)
+app.post("/sync/mlb/schedule/week", async (req, res) => {
+	try {
+		const result = await runMlbScheduleWeekSync();
 		res.json({ ok: true, result });
 	} catch (e) {
 		res.status(500).json({ ok: false, error: String(e?.message || e) });
