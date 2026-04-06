@@ -217,6 +217,10 @@ function findCol(header, matchers) {
 // ── BVP normalizer ────────────────────────────────────────────────────────────
 // Uses rich rows so the name cell uses playerNameFromCell() (name only)
 // and the game cell uses cellText() (img alt included).
+//
+// One row per player: all keys (team:name variants + name-only fallback) are
+// registered in `seen` for cross-table dedup, but only the first key gets a
+// row pushed to `out`.
 
 function normalizeBvpTables(tables) {
   const seen = new Set();
@@ -276,19 +280,29 @@ function normalizeBvpTables(tables) {
         normalized, // name-only fallback
       ];
 
+      // Register all keys in `seen` for dedup, but push only ONE row (the first key).
+      let pushed = false;
       for (const key of keys) {
-        if (seen.has(key)) continue;
+        if (seen.has(key)) {
+          if (!pushed) pushed = true; // already written by a prior table — skip entirely
+          continue;
+        }
         seen.add(key);
-        out.push([key, ...statCols]);
+        if (!pushed) {
+          out.push([key, ...statCols]);
+          pushed = true;
+        }
       }
     }
   }
 
-  console.log(`[fic] BVP normalized: ${out.length} keys`);
+  console.log(`[fic] BVP normalized: ${out.length} rows`);
   return out;
 }
 
 // ── SB normalizer ─────────────────────────────────────────────────────────────
+// One row per player: same fix as BVP — register all keys in `seen` but only
+// push the first key as the Notion row.
 
 function normalizeSbTables(tables) {
   const seen = new Set();
@@ -342,15 +356,23 @@ function normalizeSbTables(tables) {
         normalized,
       ];
 
+      // Register all keys in `seen` for dedup, but push only ONE row (the first key).
+      let pushed = false;
       for (const key of keys) {
-        if (seen.has(key)) continue;
+        if (seen.has(key)) {
+          if (!pushed) pushed = true; // already written by a prior table — skip entirely
+          continue;
+        }
         seen.add(key);
-        out.push([key, sbVal]);
+        if (!pushed) {
+          out.push([key, sbVal]);
+          pushed = true;
+        }
       }
     }
   }
 
-  console.log(`[fic] SB normalized: ${out.length} keys`);
+  console.log(`[fic] SB normalized: ${out.length} rows`);
   return out;
 }
 
