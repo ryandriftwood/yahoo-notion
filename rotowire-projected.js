@@ -9,7 +9,10 @@
 // normalized schema (Player names are pre-normalized, column headers are exact):
 //   BVP:  Player | #AB | QAB% | HH% | HRF
 //   SB:   Player | SB%
-// No fuzzy header matching needed here — exact string match only.
+//
+// FIC stores names as abbreviated "first-initial last" (e.g. "m betts").
+// Rotowire and Yahoo use full names (e.g. "mookie betts").
+// lookupPlayer() tries full-name first, then falls back to "{initial} {lastName}".
 
 import axios from "axios";
 import { Client as NotionClient } from "@notionhq/client";
@@ -38,10 +41,9 @@ const ROTOWIRE_TOMORROW_URL =
   "https://www.rotowire.com/baseball/daily-lineups.php?date=tomorrow";
 
 // ---------------------------------------------------------------------------
-// NAME NORMALIZATION — consistent key across Rotowire, Yahoo, and Notion tables.
-// NOTE: fantasyinfocentral.js stores player names pre-normalized in Notion,
-// so normalizeName(notionCell) === notionCell for FIC rows. We still normalize
-// Rotowire + Yahoo names here for matching.
+// NAME NORMALIZATION
+// Strips diacritics, punctuation (Jr., accents), lowercases, collapses spaces.
+// Must match the normalizeName() in fantasyinfocentral.js exactly.
 // ---------------------------------------------------------------------------
 
 function normalizeName(name) {
@@ -52,6 +54,34 @@ function normalizeName(name) {
     .replace(/[^a-z ]/g, "")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+// ---------------------------------------------------------------------------
+// INITIAL+LAST KEY
+// Converts a normalized full name ("mookie betts") → abbreviated key ("m betts")
+// to match FIC's storage format.
+// ---------------------------------------------------------------------------
+
+function initialLastKey(normalizedFullName) {
+  const parts = normalizedFullName.split(" ");
+  if (parts.length < 2) return normalizedFullName; // single-word name, use as-is
+  return `${parts[0][0]} ${parts.slice(1).join(" ")}`;
+}
+
+// ---------------------------------------------------------------------------
+// MAP LOOKUP — full name first, then initial+last fallback
+// Works for any map keyed by normalized name (BVP, SB, OPS, FA).
+// ---------------------------------------------------------------------------
+
+function lookupMap(map, normalizedFullName) {
+  if (map[normalizedFullName] !== undefined) return map[normalizedFullName];
+  const abbr = initialLastKey(normalizedFullName);
+  return map[abbr];
+}
+
+function hasInSet(set, normalizedFullName) {
+  if (set.has(normalizedFullName)) return true;
+  return set.has(initialLastKey(normalizedFullName));
 }
 
 // ---------------------------------------------------------------------------
@@ -125,8 +155,8 @@ async function readNotionTableRows(pageId) {
 
 // ---------------------------------------------------------------------------
 // BVP MAP
-// Fixed schema written by fantasyinfocentral.js: Player | #AB | QAB% | HH% | HRF
-// Player names are already normalized — no re-normalization needed.
+// Fixed schema: Player | #AB | QAB% | HH% | HRF
+// Keys are normalized abbreviated names ("m betts") written by fantasyinfocentral.js.
 // ---------------------------------------------------------------------------
 
 async function fetchBvpMapFromNotion() {
@@ -139,7 +169,6 @@ async function fetchBvpMapFromNotion() {
   const header = rows[0].map((h) => h.trim());
   console.log("[projected-lineup] BVP headers:", header);
 
-  // Exact match against fixed schema: Player | #AB | QAB% | HH% | HRF
   const iName = header.indexOf("Player");
   const iAb   = header.indexOf("#AB");
   const iQab  = header.indexOf("QAB%");
@@ -155,7 +184,6 @@ async function fetchBvpMapFromNotion() {
 
   const bvpMap = {};
   for (const row of rows.slice(1)) {
-    // Name is already normalized (stored that way by fantasyinfocentral.js)
     const key = row[iName]?.trim();
     if (!key) continue;
     bvpMap[key] = {
@@ -172,7 +200,7 @@ async function fetchBvpMapFromNotion() {
 
 // ---------------------------------------------------------------------------
 // SB MAP
-// Fixed schema written by fantasyinfocentral.js: Player | SB%
+// Fixed schema: Player | SB%
 // ---------------------------------------------------------------------------
 
 async function fetchSbMapFromNotion() {
@@ -185,7 +213,6 @@ async function fetchSbMapFromNotion() {
   const header = rows[0].map((h) => h.trim());
   console.log("[projected-lineup] SB headers:", header);
 
-  // Exact match against fixed schema: Player | SB%
   const iName = header.indexOf("Player");
   const iSb   = header.indexOf("SB%");
 
@@ -408,21 +435,21 @@ async function scrapeTomorrowLineups() {
 
 // ---------------------------------------------------------------------------
 // ENRICH PLAYERS
+// Uses lookupMap / hasInSet which try full name first, then "{initial} {last}".
 // ---------------------------------------------------------------------------
 
 function enrichPlayer(player, faSet, opsMap, bvpMap, sbMap) {
-  // Normalize the Rotowire name to match keys in all maps
   const key = normalizeName(player.name);
-  const bvp = bvpMap[key] || null;
+  const bvp = lookupMap(bvpMap, key) || null;
   return {
     ...player,
-    isFreeAgent: faSet.has(key),
-    ops7:   opsMap[key] ?? "",
+    isFreeAgent: hasInSet(faSet, key),
+    ops7:   lookupMap(opsMap, key) ?? "",
     bvpAb:  bvp?.ab    ?? "",
     bvpQab: bvp?.qab   ?? "",
     bvpHh:  bvp?.hhPct ?? "",
     bvpHrf: bvp?.hrf   ?? "",
-    sbPct:  sbMap[key] ?? "",
+    sbPct:  lookupMap(sbMap, key) ?? "",
   };
 }
 
