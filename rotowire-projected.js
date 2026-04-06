@@ -2,11 +2,14 @@
 // Scrapes tomorrow's PROJECTED lineups from Rotowire and enriches each batter with:
 //   • Free Agent flag         (Yahoo status=A pool)
 //   • Last-7-days OPS         (Yahoo stat ID 55, type=lastweek)
-//   • BVP: AB, QAB, HH%, HRF  (read from existing FIC_BVP_TOMORROW_PAGE_ID Notion table)
-//   • SB%                     (read from existing FIC_SB_TOMORROW_PAGE_ID Notion table)
+//   • BVP: AB, QAB%, HH%, HRF (read from FIC_BVP_TOMORROW_PAGE_ID Notion table)
+//   • SB%                     (read from FIC_SB_TOMORROW_PAGE_ID Notion table)
 //
-// BVP and SB% are read directly from the Notion pages that /sync/fic/bvp/tomorrow
-// and /sync/fic/sb/tomorrow already populate — no re-scraping FIC.
+// BVP and SB% Notion pages are written by fantasyinfocentral.js using a FIXED
+// normalized schema (Player names are pre-normalized, column headers are exact):
+//   BVP:  Player | #AB | QAB% | HH% | HRF
+//   SB:   Player | SB%
+// No fuzzy header matching needed here — exact string match only.
 
 import axios from "axios";
 import { Client as NotionClient } from "@notionhq/client";
@@ -35,15 +38,18 @@ const ROTOWIRE_TOMORROW_URL =
   "https://www.rotowire.com/baseball/daily-lineups.php?date=tomorrow";
 
 // ---------------------------------------------------------------------------
-// NAME NORMALIZATION  — consistent key across Rotowire, Yahoo, and Notion tables
+// NAME NORMALIZATION — consistent key across Rotowire, Yahoo, and Notion tables.
+// NOTE: fantasyinfocentral.js stores player names pre-normalized in Notion,
+// so normalizeName(notionCell) === notionCell for FIC rows. We still normalize
+// Rotowire + Yahoo names here for matching.
 // ---------------------------------------------------------------------------
 
 function normalizeName(name) {
-  return name
+  return String(name || "")
     .toLowerCase()
     .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")   // strip diacritics (e.g. Yordan Álvarez)
-    .replace(/[^a-z ]/g, "")           // strip punctuation / Jr. / accents
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z ]/g, "")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -68,13 +74,10 @@ function getAttr(tagHtml, attrName) {
 
 // ---------------------------------------------------------------------------
 // NOTION TABLE READER
-// Reads all table blocks from a Notion page and returns rows from the LARGEST
-// table found (most rows = actual data table, not a metadata/header table).
-// Row 0 is the header row.
+// Reads the largest table block from a Notion page.
 // ---------------------------------------------------------------------------
 
 async function readNotionTableRows(pageId) {
-  // List all child blocks of the page (paginate)
   let cursor;
   const allBlocks = [];
   while (true) {
@@ -88,15 +91,12 @@ async function readNotionTableRows(pageId) {
     cursor = resp.next_cursor;
   }
 
-  // Find ALL table blocks — FIC pages may have multiple tables
   const tableBlocks = allBlocks.filter((b) => b.type === "table");
   if (!tableBlocks.length) {
     console.warn(`[projected-lineup] No table block found in Notion page ${pageId}`);
     return [];
   }
 
-  // Read rows from every table block, keep the one with the most rows
-  // (the largest table is always the data table, not a header/metadata block)
   let bestRows = [];
   for (const tableBlock of tableBlocks) {
     let rowCursor;
@@ -114,9 +114,8 @@ async function readNotionTableRows(pageId) {
     if (rowBlocks.length > bestRows.length) bestRows = rowBlocks;
   }
 
-  console.log(`[projected-lineup] Notion page ${pageId}: found ${tableBlocks.length} table(s), using largest with ${bestRows.length} rows`);
+  console.log(`[projected-lineup] Notion page ${pageId}: ${tableBlocks.length} table(s), using largest (${bestRows.length} rows)`);
 
-  // Extract plain text from each cell's rich_text array
   return bestRows.map((row) =>
     (row.table_row?.cells || []).map((cell) =>
       cell.map((rt) => rt.plain_text ?? rt?.text?.content ?? "").join("")
@@ -125,8 +124,9 @@ async function readNotionTableRows(pageId) {
 }
 
 // ---------------------------------------------------------------------------
-// BVP MAP  — reads FIC_BVP_TOMORROW_PAGE_ID Notion table
-// Returns: normalizedName → { ab, qab, hhPct, hrf }
+// BVP MAP
+// Fixed schema written by fantasyinfocentral.js: Player | #AB | QAB% | HH% | HRF
+// Player names are already normalized — no re-normalization needed.
 // ---------------------------------------------------------------------------
 
 async function fetchBvpMapFromNotion() {
@@ -136,39 +136,29 @@ async function fetchBvpMapFromNotion() {
     return {};
   }
 
-  const header = rows[0].map((h) => h.toLowerCase().trim());
-  console.log("[projected-lineup] BVP table headers:", header);
+  const header = rows[0].map((h) => h.trim());
+  console.log("[projected-lineup] BVP headers:", header);
 
-  // Broad matching — covers "batter", "player", "name", "hitter", "batter name", etc.
-  const iName = header.findIndex((h) =>
-    h === "batter" || h === "player" || h === "name" || h === "hitter" ||
-    h.startsWith("batter") || h.startsWith("hitter") || h.startsWith("player")
-  );
-  // "ab", "ab#", "at bats", "atbats"
-  const iAb = header.findIndex((h) =>
-    h === "ab" || h === "ab#" || h === "at bats" || h === "atbats"
-  );
-  // "qab", "qab%", "qab #", etc.
-  const iQab = header.findIndex((h) => h === "qab" || h.startsWith("qab"));
-  // "hh%", "hh", "hard hit%", "hard hit", etc.
-  const iHh = header.findIndex((h) => h.includes("hh") || h.includes("hard hit"));
-  // "hrf", "hr f", "hr/f", "hr f%", "hrfb", etc.
-  const iHrf = header.findIndex((h) =>
-    h === "hrf" || h === "hr f" || h === "hr/f" || h.startsWith("hrf") || h.startsWith("hr f") || h.startsWith("hr/f")
-  );
+  // Exact match against fixed schema: Player | #AB | QAB% | HH% | HRF
+  const iName = header.indexOf("Player");
+  const iAb   = header.indexOf("#AB");
+  const iQab  = header.indexOf("QAB%");
+  const iHh   = header.indexOf("HH%");
+  const iHrf  = header.indexOf("HRF");
 
   if (iName === -1) {
-    console.warn("[projected-lineup] BVP table: could not find batter name column. Header:", header);
+    console.warn("[projected-lineup] BVP table missing 'Player' column. Headers:", header);
     return {};
   }
 
-  console.log(`[projected-lineup] BVP column indices — name:${iName} ab:${iAb} qab:${iQab} hh:${iHh} hrf:${iHrf}`);
+  console.log(`[projected-lineup] BVP indices — name:${iName} ab:${iAb} qab:${iQab} hh:${iHh} hrf:${iHrf}`);
 
   const bvpMap = {};
   for (const row of rows.slice(1)) {
-    const rawName = row[iName] || "";
-    if (!rawName) continue;
-    bvpMap[normalizeName(rawName)] = {
+    // Name is already normalized (stored that way by fantasyinfocentral.js)
+    const key = row[iName]?.trim();
+    if (!key) continue;
+    bvpMap[key] = {
       ab:    iAb  >= 0 ? (row[iAb]  || "") : "",
       qab:   iQab >= 0 ? (row[iQab] || "") : "",
       hhPct: iHh  >= 0 ? (row[iHh]  || "") : "",
@@ -176,13 +166,13 @@ async function fetchBvpMapFromNotion() {
     };
   }
 
-  console.log(`[projected-lineup] BVP map from Notion: ${Object.keys(bvpMap).length} players`);
+  console.log(`[projected-lineup] BVP map: ${Object.keys(bvpMap).length} players`);
   return bvpMap;
 }
 
 // ---------------------------------------------------------------------------
-// SB MAP  — reads FIC_SB_TOMORROW_PAGE_ID Notion table
-// Returns: normalizedName → sbPct string
+// SB MAP
+// Fixed schema written by fantasyinfocentral.js: Player | SB%
 // ---------------------------------------------------------------------------
 
 async function fetchSbMapFromNotion() {
@@ -192,34 +182,26 @@ async function fetchSbMapFromNotion() {
     return {};
   }
 
-  const header = rows[0].map((h) => h.toLowerCase().trim());
-  console.log("[projected-lineup] SB table headers:", header);
+  const header = rows[0].map((h) => h.trim());
+  console.log("[projected-lineup] SB headers:", header);
 
-  // Broad name matching
-  const iName = header.findIndex((h) =>
-    h === "player" || h === "batter" || h === "name" || h === "hitter" ||
-    h.startsWith("player") || h.startsWith("batter") || h.startsWith("hitter")
-  );
-  // Any column containing "sb", "steal", or "prob"
-  const iSb = header.findIndex((h) =>
-    h.includes("sb") || h.includes("steal") || h.includes("prob")
-  );
+  // Exact match against fixed schema: Player | SB%
+  const iName = header.indexOf("Player");
+  const iSb   = header.indexOf("SB%");
 
   if (iName === -1 || iSb === -1) {
-    console.warn("[projected-lineup] SB table: could not find expected columns. Header:", header);
+    console.warn("[projected-lineup] SB table missing expected columns. Headers:", header);
     return {};
   }
 
-  console.log(`[projected-lineup] SB column indices — name:${iName} sb:${iSb}`);
-
   const sbMap = {};
   for (const row of rows.slice(1)) {
-    const rawName = row[iName] || "";
-    if (!rawName) continue;
-    sbMap[normalizeName(rawName)] = row[iSb] || "";
+    const key = row[iName]?.trim();
+    if (!key) continue;
+    sbMap[key] = row[iSb] || "";
   }
 
-  console.log(`[projected-lineup] SB map from Notion: ${Object.keys(sbMap).length} players`);
+  console.log(`[projected-lineup] SB map: ${Object.keys(sbMap).length} players`);
   return sbMap;
 }
 
@@ -429,6 +411,7 @@ async function scrapeTomorrowLineups() {
 // ---------------------------------------------------------------------------
 
 function enrichPlayer(player, faSet, opsMap, bvpMap, sbMap) {
+  // Normalize the Rotowire name to match keys in all maps
   const key = normalizeName(player.name);
   const bvp = bvpMap[key] || null;
   return {
@@ -452,10 +435,10 @@ function formatPlayerLine(p) {
   const ops = p.ops7 ? ` | L7 OPS: ${p.ops7}` : "";
   const bvp = (p.bvpAb || p.bvpQab || p.bvpHh || p.bvpHrf)
     ? ` | BVP: ${[
-        p.bvpAb  ? `${p.bvpAb} AB`   : "",
-        p.bvpQab ? `QAB ${p.bvpQab}` : "",
-        p.bvpHh  ? `HH% ${p.bvpHh}`  : "",
-        p.bvpHrf ? `HRF ${p.bvpHrf}` : "",
+        p.bvpAb  ? `${p.bvpAb} AB`    : "",
+        p.bvpQab ? `QAB% ${p.bvpQab}` : "",
+        p.bvpHh  ? `HH% ${p.bvpHh}`   : "",
+        p.bvpHrf ? `HRF ${p.bvpHrf}`  : "",
       ].filter(Boolean).join(", ")}`
     : "";
   const sb = p.sbPct ? ` | SB% ${p.sbPct}` : "";
@@ -494,7 +477,7 @@ function formatSnapshot(snapshot) {
     `MLB Projected Lineups — ${dateStr}`,
     `(pulled ${ts} MT)`,
     `${snapshot.games.length} games scheduled`,
-    `Legend: 🟢FA = Free Agent | L7 OPS = Last 7 days | BVP = vs tomorrow's pitcher (AB/QAB/HH%/HRF) | SB% = steal probability`,
+    `Legend: 🟢FA = Free Agent | L7 OPS = Last 7 days | BVP = vs tomorrow's pitcher (#AB/QAB%/HH%/HRF) | SB% = steal probability`,
     "",
   ];
 
@@ -592,7 +575,7 @@ export async function runProjectedLineupSync() {
   }
   console.log(`[projected-lineup] Found ${snapshot.games.length} games from Rotowire.`);
 
-  // 2) Fetch enrichment data in parallel — all independent, all gracefully degraded
+  // 2) Fetch enrichment data in parallel — all independent, gracefully degraded
   console.log("[projected-lineup] Reading FA list, L7 OPS, BVP, and SB% in parallel...");
   const [faSet, opsMap, bvpMap, sbMap] = await Promise.all([
     fetchFreeAgentNameSet().catch((e) => {
