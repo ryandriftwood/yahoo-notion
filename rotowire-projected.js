@@ -68,7 +68,8 @@ function getAttr(tagHtml, attrName) {
 
 // ---------------------------------------------------------------------------
 // NOTION TABLE READER
-// Reads all table blocks from a Notion page, returns array of row arrays.
+// Reads all table blocks from a Notion page and returns rows from the LARGEST
+// table found (most rows = actual data table, not a metadata/header table).
 // Row 0 is the header row.
 // ---------------------------------------------------------------------------
 
@@ -87,29 +88,36 @@ async function readNotionTableRows(pageId) {
     cursor = resp.next_cursor;
   }
 
-  // Find the first table block
-  const tableBlock = allBlocks.find((b) => b.type === "table");
-  if (!tableBlock) {
+  // Find ALL table blocks — FIC pages may have multiple tables
+  const tableBlocks = allBlocks.filter((b) => b.type === "table");
+  if (!tableBlocks.length) {
     console.warn(`[projected-lineup] No table block found in Notion page ${pageId}`);
     return [];
   }
 
-  // Read the table's row children (paginate)
-  let rowCursor;
-  const rowBlocks = [];
-  while (true) {
-    const resp = await notion.blocks.children.list({
-      block_id: tableBlock.id,
-      start_cursor: rowCursor,
-      page_size: 100,
-    });
-    rowBlocks.push(...resp.results);
-    if (!resp.has_more) break;
-    rowCursor = resp.next_cursor;
+  // Read rows from every table block, keep the one with the most rows
+  // (the largest table is always the data table, not a header/metadata block)
+  let bestRows = [];
+  for (const tableBlock of tableBlocks) {
+    let rowCursor;
+    const rowBlocks = [];
+    while (true) {
+      const resp = await notion.blocks.children.list({
+        block_id: tableBlock.id,
+        start_cursor: rowCursor,
+        page_size: 100,
+      });
+      rowBlocks.push(...resp.results);
+      if (!resp.has_more) break;
+      rowCursor = resp.next_cursor;
+    }
+    if (rowBlocks.length > bestRows.length) bestRows = rowBlocks;
   }
 
+  console.log(`[projected-lineup] Notion page ${pageId}: found ${tableBlocks.length} table(s), using largest with ${bestRows.length} rows`);
+
   // Extract plain text from each cell's rich_text array
-  return rowBlocks.map((row) =>
+  return bestRows.map((row) =>
     (row.table_row?.cells || []).map((cell) =>
       cell.map((rt) => rt.plain_text ?? rt?.text?.content ?? "").join("")
     )
@@ -129,16 +137,32 @@ async function fetchBvpMapFromNotion() {
   }
 
   const header = rows[0].map((h) => h.toLowerCase().trim());
-  const iName = header.findIndex((h) => h === "batter" || h === "player" || h === "name");
-  const iAb   = header.findIndex((h) => h === "ab");
-  const iQab  = header.findIndex((h) => h === "qab");
-  const iHh   = header.findIndex((h) => h.includes("hh"));
-  const iHrf  = header.findIndex((h) => h === "hrf" || h === "hr f");
+  console.log("[projected-lineup] BVP table headers:", header);
+
+  // Broad matching — covers "batter", "player", "name", "hitter", "batter name", etc.
+  const iName = header.findIndex((h) =>
+    h === "batter" || h === "player" || h === "name" || h === "hitter" ||
+    h.startsWith("batter") || h.startsWith("hitter") || h.startsWith("player")
+  );
+  // "ab", "ab#", "at bats", "atbats"
+  const iAb = header.findIndex((h) =>
+    h === "ab" || h === "ab#" || h === "at bats" || h === "atbats"
+  );
+  // "qab", "qab%", "qab #", etc.
+  const iQab = header.findIndex((h) => h === "qab" || h.startsWith("qab"));
+  // "hh%", "hh", "hard hit%", "hard hit", etc.
+  const iHh = header.findIndex((h) => h.includes("hh") || h.includes("hard hit"));
+  // "hrf", "hr f", "hr/f", "hr f%", "hrfb", etc.
+  const iHrf = header.findIndex((h) =>
+    h === "hrf" || h === "hr f" || h === "hr/f" || h.startsWith("hrf") || h.startsWith("hr f") || h.startsWith("hr/f")
+  );
 
   if (iName === -1) {
     console.warn("[projected-lineup] BVP table: could not find batter name column. Header:", header);
     return {};
   }
+
+  console.log(`[projected-lineup] BVP column indices — name:${iName} ab:${iAb} qab:${iQab} hh:${iHh} hrf:${iHrf}`);
 
   const bvpMap = {};
   for (const row of rows.slice(1)) {
@@ -169,13 +193,24 @@ async function fetchSbMapFromNotion() {
   }
 
   const header = rows[0].map((h) => h.toLowerCase().trim());
-  const iName = header.findIndex((h) => h === "player" || h === "batter" || h === "name");
-  const iSb   = header.findIndex((h) => h.includes("sb") || h.includes("steal"));
+  console.log("[projected-lineup] SB table headers:", header);
+
+  // Broad name matching
+  const iName = header.findIndex((h) =>
+    h === "player" || h === "batter" || h === "name" || h === "hitter" ||
+    h.startsWith("player") || h.startsWith("batter") || h.startsWith("hitter")
+  );
+  // Any column containing "sb", "steal", or "prob"
+  const iSb = header.findIndex((h) =>
+    h.includes("sb") || h.includes("steal") || h.includes("prob")
+  );
 
   if (iName === -1 || iSb === -1) {
     console.warn("[projected-lineup] SB table: could not find expected columns. Header:", header);
     return {};
   }
+
+  console.log(`[projected-lineup] SB column indices — name:${iName} sb:${iSb}`);
 
   const sbMap = {};
   for (const row of rows.slice(1)) {
@@ -459,7 +494,7 @@ function formatSnapshot(snapshot) {
     `MLB Projected Lineups — ${dateStr}`,
     `(pulled ${ts} MT)`,
     `${snapshot.games.length} games scheduled`,
-    `Legend: 🟢FA = Free Agent | L7 OPS = Last 7 days | BVP = vs tomorrow’s pitcher (AB/QAB/HH%/HRF) | SB% = steal probability`,
+    `Legend: 🟢FA = Free Agent | L7 OPS = Last 7 days | BVP = vs tomorrow's pitcher (AB/QAB/HH%/HRF) | SB% = steal probability`,
     "",
   ];
 
