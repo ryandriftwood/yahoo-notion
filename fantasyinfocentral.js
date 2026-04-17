@@ -220,8 +220,9 @@ function normalizeBvpTables(tables) {
       continue;
     }
 
-    // Fix: use exact-match lambda for AB to avoid substring collision with "qab%"
-    const iAb  = findCol(header, ["#ab", "at bats", "atbats", (h) => h === "ab" || h === "#ab"]);
+    // Use exact-match lambda for AB — the old "ab" string matched "qab%" via includes,
+    // and "#ab" string still matched "#ab%" (a QAB%-formatted column on fIC). Exact only.
+    const iAb  = findCol(header, ["at bats", "atbats", (h) => h === "ab" || h === "#ab" || h === "# ab"]);
     const iQab = findCol(header, ["qab%", "qab #", "qab", (h) => h.startsWith("qab")]);
     const iHh  = findCol(header, ["hh%", "hh", "hard hit%", "hard hit", (h) => h.includes("hh") || h.includes("hard hit")]);
     const iHrf = findCol(header, ["hrf", "hr/f", "hr f", "hrfb", "hr f%", (h) => h.startsWith("hrf") || h.startsWith("hr/f") || h.startsWith("hr f")]);
